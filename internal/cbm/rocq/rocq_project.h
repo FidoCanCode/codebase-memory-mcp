@@ -1,25 +1,25 @@
 // SPDX-License-Identifier: MIT
 //
-// rocq_project.h — Logical-to-physical module resolution for Rocq projects.
+// rocq_project.h — dune-based logical→physical module resolution for Rocq.
 //
-// Original work. Rocq maps logical (dotted) module names onto physical .v
-// files through `-Q <dir> <logical>` and `-R <dir> <logical>` directives in a
-// _CoqProject file (and equivalently through dune coq.theory stanzas). This
-// module parses those directives and resolves a logical name such as
-// "MyDev.Base" to a repo-relative path such as "theories/Base.v" — the Rocq
-// analogue of include-path resolution in the other language front-ends.
+// Original work. Modern Rocq projects declare their load path with dune
+// `(coq.theory (name L) ...)` stanzas: every `.v` file under the stanza's
+// directory belongs to logical theory `L`, named by its path relative to that
+// directory (e.g. `theories/Sub/Mod.v` → `L.Sub.Mod`). This module parses those
+// stanzas and resolves a logical dotted module name to the physical `.v` path —
+// the Rocq analogue of include-path resolution in the other language
+// front-ends, and what disambiguates same-named modules across directories.
 #ifndef CBM_ROCQ_PROJECT_H
 #define CBM_ROCQ_PROJECT_H
 
 #include <stdbool.h>
 
 typedef struct {
-    char *physdir; // repo-relative physical directory ("" == repo root)
-    char *logical; // logical dotted prefix ("" == no prefix / path is the name)
-    bool recursive;
+    char *physdir; // repo-relative directory of the dune file ("" == repo root)
+    char *logical; // theory logical name from (coq.theory (name ...))
 } RocqProjEntry;
 
-typedef struct {
+typedef struct RocqProjMap {
     RocqProjEntry *entries;
     int count;
     int cap;
@@ -28,13 +28,14 @@ typedef struct {
 void rocq_projmap_init(RocqProjMap *m);
 void rocq_projmap_free(RocqProjMap *m);
 
-// Parse a _CoqProject file's text, adding its -Q/-R mappings. `dir` is the
-// repo-relative directory containing the file (NULL/"" for repo root); it is
-// prepended to each directive's physical directory.
-void rocq_projmap_add_coqproject(RocqProjMap *m, const char *dir, const char *text, int len);
+// Parse a dune / dune-project file's text, adding a mapping for each
+// `(coq.theory (name L) ...)` stanza found. `dir` is the repo-relative
+// directory containing the file (NULL/"" for repo root) — the theory root.
+void rocq_projmap_add_dune(RocqProjMap *m, const char *dir, const char *text, int len);
 
-// Resolve a logical dotted module name to a repo-relative .v path. On a match,
-// writes the path into out (capacity outsz) and returns true.
+// Resolve a logical dotted module name (e.g. "MyDev.Base") to a repo-relative
+// `.v` path (e.g. "theories/Base.v"). On a match, writes the path into `out`
+// (capacity outsz) and returns true; otherwise returns false.
 bool rocq_projmap_resolve(const RocqProjMap *m, const char *logical, char *out, int outsz);
 
 #endif // CBM_ROCQ_PROJECT_H

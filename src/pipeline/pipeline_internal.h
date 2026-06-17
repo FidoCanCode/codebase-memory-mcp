@@ -14,6 +14,7 @@
 #include "discover/discover.h"
 #include "foundation/hash_table.h"
 #include "cbm.h"
+#include "rocq/rocq_project.h" /* RocqProjMap — dune load-path resolution */
 #include "lsp/go_lsp.h" /* CBMLSPDef for cbm_parallel_resolve cross-LSP inputs */
 #include <stdatomic.h>
 
@@ -75,6 +76,10 @@ typedef struct {
 CBMHashTable *cbm_pipeline_get_pkgmap(void);
 void cbm_pipeline_set_pkgmap(CBMHashTable *map);
 
+/* Get/set the current pipeline's Rocq dune load-path map (NULL if none). */
+RocqProjMap *cbm_pipeline_get_rocq_projmap(void);
+void cbm_pipeline_set_rocq_projmap(RocqProjMap *m);
+
 /* Unified module resolver: relative → pkgmap → fqn_module fallback.
  * Handles bare specifiers via pkgmap lookup with prefix matching.
  * Caller must free() the returned string. */
@@ -124,6 +129,11 @@ CBMHashTable *cbm_pkgmap_build_from_repo(const char *repo_path, const cbm_file_i
                                          int file_count, const char *project_name);
 CBMHashTable *cbm_pkgmap_build_from_files(const cbm_file_info_t *files, int file_count,
                                           const char *project_name);
+
+/* Build the Rocq dune coq.theory load-path map from the discovered files
+ * (scans `dune` / `dune-project`). Caller owns the result; free with
+ * rocq_projmap_free() + free(). Returns NULL on allocation failure. */
+RocqProjMap *cbm_rocq_projmap_build_from_repo(const cbm_file_info_t *files, int file_count);
 
 /* Free pkgmap and all owned strings. */
 void cbm_pkgmap_free(CBMHashTable *pkgmap);

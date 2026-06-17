@@ -1008,6 +1008,42 @@ void cbm_pkgmap_free(CBMHashTable *pkgmap) {
     cbm_ht_free(pkgmap);
 }
 
+/* ── Rocq dune load-path map ───────────────────────────────────── */
+
+RocqProjMap *cbm_rocq_projmap_build_from_repo(const cbm_file_info_t *files, int file_count) {
+    RocqProjMap *m = (RocqProjMap *)malloc(sizeof(*m));
+    if (!m) {
+        return NULL;
+    }
+    rocq_projmap_init(m);
+    for (int i = 0; i < file_count; i++) {
+        const char *base = path_basename(files[i].rel_path);
+        if (strcmp(base, "dune") != 0 && strcmp(base, "dune-project") != 0) {
+            continue;
+        }
+        int source_len = 0;
+        char *source = pkgmap_read_file(files[i].path, &source_len);
+        if (!source) {
+            continue;
+        }
+        /* Repo-relative directory containing the dune file ("" at the root). */
+        char dir[1024];
+        size_t dlen = (size_t)(base - files[i].rel_path);
+        if (dlen > 0 && dlen < sizeof(dir)) {
+            if (files[i].rel_path[dlen - 1] == '/') {
+                dlen--; /* drop the separator */
+            }
+            memcpy(dir, files[i].rel_path, dlen);
+            dir[dlen] = '\0';
+        } else {
+            dir[0] = '\0';
+        }
+        rocq_projmap_add_dune(m, dir, source, source_len);
+        free(source);
+    }
+    return m;
+}
+
 /* ── Resolver ──────────────────────────────────────────────────── */
 
 /* Try slash-based prefix matching (Go: github.com/foo/bar/pkg/utils).
@@ -1345,6 +1381,27 @@ const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t
                                                         CBMHashTable *namespace_map) {
     if (!ctx || !imp || !imp->module_path) {
         return NULL;
+    }
+
+    /* Strategy 0: Rocq dune load-path resolution. For a `.v` importer, map the
+     * logical module name (e.g. "MyDev.Base" from `Require Import`) to its
+     * physical .v file via the project's coq.theory mappings, then to that
+     * file's module node — disambiguating same-named modules across dirs. */
+    if (source_rel) {
+        size_t srl = strlen(source_rel);
+        if (srl >= 2 && source_rel[srl - 2] == '.' && source_rel[srl - 1] == 'v') {
+            const RocqProjMap *pm = cbm_pipeline_get_rocq_projmap();
+            char phys[1024];
+            if (pm && rocq_projmap_resolve(pm, imp->module_path, phys, sizeof(phys))) {
+                char *qn = cbm_pipeline_fqn_module(ctx->project_name, phys);
+                const cbm_gbuf_node_t *t = qn ? cbm_gbuf_find_by_qn(ctx->gbuf, qn) : NULL;
+                free(qn);
+                if (t && (!source_file_qn || !t->qualified_name ||
+                          strcmp(t->qualified_name, source_file_qn) != 0)) {
+                    return t;
+                }
+            }
+        }
     }
 
     /* Strategy 1: module-path resolution → existing node (Python/TS/Go). */

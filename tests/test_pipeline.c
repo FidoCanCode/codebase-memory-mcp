@@ -5681,16 +5681,14 @@ TEST(pipeline_rocq_end_to_end) {
 
     char path[512];
 
-    /* _CoqProject maps logical prefix MyDev → theories/ (not yet consumed by
-     * the focused first cut, but present for realism). */
-    snprintf(path, sizeof(path), "%s/_CoqProject", tmpdir);
-    FILE *f = fopen(path, "w");
-    ASSERT_NOT_NULL(f);
-    fprintf(f, "-Q theories MyDev\n");
-    fclose(f);
-
+    /* dune coq.theory maps logical prefix MyDev → theories/ (the load path). */
     snprintf(path, sizeof(path), "%s/theories", tmpdir);
     cbm_mkdir(path);
+    snprintf(path, sizeof(path), "%s/theories/dune", tmpdir);
+    FILE *f = fopen(path, "w");
+    ASSERT_NOT_NULL(f);
+    fprintf(f, "(coq.theory (name MyDev))\n");
+    fclose(f);
 
     /* Base.v — a definition, an inductive with constructors, and a lemma. */
     snprintf(path, sizeof(path), "%s/theories/Base.v", tmpdir);
@@ -5710,6 +5708,16 @@ TEST(pipeline_rocq_end_to_end) {
                "Definition twice (n : nat) : nat := base_id (base_id n).\n"
                "Theorem use_thm : forall n : nat, twice n = n.\n"
                "Proof. intros n. unfold twice. rewrite base_lem. apply base_lem. Qed.\n");
+    fclose(f);
+
+    /* A decoy module also named Base, OUTSIDE the MyDev theory. The dune load
+     * path must steer `Require Import Base` to theories/Base, not this one. */
+    snprintf(path, sizeof(path), "%s/decoy", tmpdir);
+    cbm_mkdir(path);
+    snprintf(path, sizeof(path), "%s/decoy/Base.v", tmpdir);
+    f = fopen(path, "w");
+    ASSERT_NOT_NULL(f);
+    fprintf(f, "Definition decoy_marker : nat := 0.\n");
     fclose(f);
 
     char db_path[512];
@@ -5750,6 +5758,30 @@ TEST(pipeline_rocq_end_to_end) {
     ASSERT_GTE(cbm_store_count_edges_by_type(s, project, "DEFINES"), 6);
     ASSERT_GTE(cbm_store_count_edges_by_type(s, project, "IMPORTS"), 1);
     ASSERT_GTE(cbm_store_count_edges_by_type(s, project, "CALLS"), 1);
+
+    /* The IMPORTS edge must resolve via the dune load path to theories/Base,
+     * never the decoy decoy/Base — proving Strategy 0, not the name fallback. */
+    cbm_edge_t *imp_edges = NULL;
+    int ie = 0;
+    cbm_store_find_edges_by_type(s, project, "IMPORTS", &imp_edges, &ie);
+    int to_theory = 0, to_decoy = 0;
+    for (int i = 0; i < ie; i++) {
+        cbm_node_t tgt = {0};
+        if (cbm_store_find_node_by_id(s, imp_edges[i].target_id, &tgt) == CBM_STORE_OK &&
+            tgt.qualified_name) {
+            if (strstr(tgt.qualified_name, "theories.Base")) {
+                to_theory = 1;
+            } else if (strstr(tgt.qualified_name, "decoy.Base")) {
+                to_decoy = 1;
+            }
+        }
+        cbm_node_free_fields(&tgt);
+    }
+    if (imp_edges) {
+        cbm_store_free_edges(imp_edges, ie);
+    }
+    ASSERT_TRUE(to_theory);
+    ASSERT_FALSE(to_decoy);
 
     cbm_store_close(s);
     cbm_pipeline_free(p);

@@ -277,38 +277,41 @@ TEST(rocq_qualified_name_call) {
     PASS();
 }
 
-/* ── _CoqProject logical→physical resolution ───────────────────── */
+/* ── dune coq.theory logical→physical resolution ───────────────── */
 
-TEST(rocq_projmap_resolves_logical) {
+TEST(rocq_projmap_resolves_dune_theory) {
     RocqProjMap m;
     rocq_projmap_init(&m);
-    const char *cp = "-Q theories MyDev\n-R src Foo\nsome_file.v\n";
-    rocq_projmap_add_coqproject(&m, NULL, cp, (int)strlen(cp));
+    const char *dune = "(coq.theory\n (name MyDev)\n (package coq-mydev))\n";
+    rocq_projmap_add_dune(&m, "theories", dune, (int)strlen(dune));
 
     char out[256];
     ASSERT(rocq_projmap_resolve(&m, "MyDev.Base", out, sizeof(out)));
     ASSERT_STR_EQ(out, "theories/Base.v");
+    /* Subdirectories qualify the module name. */
     ASSERT(rocq_projmap_resolve(&m, "MyDev.Sub.Mod", out, sizeof(out)));
     ASSERT_STR_EQ(out, "theories/Sub/Mod.v");
-    ASSERT(rocq_projmap_resolve(&m, "Foo.Bar", out, sizeof(out)));
-    ASSERT_STR_EQ(out, "src/Bar.v");
-    /* No mapping matches → unresolved. */
-    ASSERT_FALSE(rocq_projmap_resolve(&m, "Unknown.X", out, sizeof(out)));
+    /* A different logical prefix doesn't match. */
+    ASSERT_FALSE(rocq_projmap_resolve(&m, "Other.X", out, sizeof(out)));
 
     rocq_projmap_free(&m);
     PASS();
 }
 
-/* A directory-prefixed _CoqProject (nested project file) joins paths. */
-TEST(rocq_projmap_dir_prefixed) {
+TEST(rocq_projmap_dune_dotted_name_and_root) {
     RocqProjMap m;
     rocq_projmap_init(&m);
-    const char *cp = "-Q . Lib\n";
-    rocq_projmap_add_coqproject(&m, "vendor/lib", cp, (int)strlen(cp));
+    const char *d1 = "(coq.theory (name My.Lib))";
+    rocq_projmap_add_dune(&m, "src", d1, (int)strlen(d1));
+    /* A dune-project at the repo root (empty dir). */
+    const char *d2 = "(coq.theory (name Root))";
+    rocq_projmap_add_dune(&m, "", d2, (int)strlen(d2));
 
     char out[256];
-    ASSERT(rocq_projmap_resolve(&m, "Lib.Core", out, sizeof(out)));
-    ASSERT_STR_EQ(out, "vendor/lib/Core.v");
+    ASSERT(rocq_projmap_resolve(&m, "My.Lib.Core", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "src/Core.v");
+    ASSERT(rocq_projmap_resolve(&m, "Root.Top", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "Top.v");
 
     rocq_projmap_free(&m);
     PASS();
@@ -332,6 +335,6 @@ SUITE(rocq) {
     RUN_TEST(rocq_string_inside_comment);
     RUN_TEST(rocq_doubled_quote_string);
     RUN_TEST(rocq_qualified_name_call);
-    RUN_TEST(rocq_projmap_resolves_logical);
-    RUN_TEST(rocq_projmap_dir_prefixed);
+    RUN_TEST(rocq_projmap_resolves_dune_theory);
+    RUN_TEST(rocq_projmap_dune_dotted_name_and_root);
 }
