@@ -25,6 +25,7 @@ extern void suite_extraction_imports(void);
 extern void suite_grammar_regression(void);
 extern void suite_grammar_labels(void);
 extern void suite_grammar_imports(void);
+extern void suite_rocq(void);
 extern void suite_ac(void);
 extern void suite_store_nodes(void);
 extern void suite_store_edges(void);
@@ -118,6 +119,7 @@ int main(void) {
     /* Existing C code regression tests */
     RUN_SUITE(ac);
     RUN_SUITE(extraction);
+    RUN_SUITE(rocq);
     RUN_SUITE(extraction_inheritance);
     RUN_SUITE(extraction_imports);
     RUN_SUITE(grammar_regression);

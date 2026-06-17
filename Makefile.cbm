@@ -129,7 +129,11 @@ EXTRACTION_SRCS = \
     $(CBM_DIR)/extract_k8s.c \
     $(CBM_DIR)/helpers.c \
     $(CBM_DIR)/lang_specs.c \
-    $(CBM_DIR)/service_patterns.c
+    $(CBM_DIR)/service_patterns.c \
+    $(CBM_DIR)/rocq/rocq_lex.c \
+    $(CBM_DIR)/rocq/rocq_parse.c \
+    $(CBM_DIR)/rocq/rocq_project.c \
+    $(CBM_DIR)/rocq/rocq_extract.c
 
 # LSP resolvers (compiled as one unit via lsp_all.c)
 LSP_SRCS = $(CBM_DIR)/lsp_all.c
@@ -301,6 +305,7 @@ TEST_EXTRACTION_SRCS = \
     tests/test_grammar_regression.c \
     tests/test_grammar_labels.c \
     tests/test_grammar_imports.c \
+    tests/test_rocq.c \
     tests/test_ac.c
 
 TEST_STORE_SRCS = \

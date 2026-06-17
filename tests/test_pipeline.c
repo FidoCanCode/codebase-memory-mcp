@@ -5666,6 +5666,97 @@ TEST(pipeline_complexity_transitive_loop_depth) {
     PASS();
 }
 
+/* ── Rocq (.v) end-to-end: original hand-written front-end ───────── */
+
+/* Index a small multi-module Rocq development and verify the graph captures
+ * definitions, the Require dependency, and proof-dependency calls. Exercises
+ * the original parser through the full pipeline (.v disambiguation, extraction,
+ * import resolution via the module-name fallback, and call resolution). */
+TEST(pipeline_rocq_end_to_end) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cbm_rocq_XXXXXX");
+    if (!cbm_mkdtemp(tmpdir)) {
+        FAIL("failed to create temp dir");
+    }
+
+    char path[512];
+
+    /* _CoqProject maps logical prefix MyDev → theories/ (not yet consumed by
+     * the focused first cut, but present for realism). */
+    snprintf(path, sizeof(path), "%s/_CoqProject", tmpdir);
+    FILE *f = fopen(path, "w");
+    ASSERT_NOT_NULL(f);
+    fprintf(f, "-Q theories MyDev\n");
+    fclose(f);
+
+    snprintf(path, sizeof(path), "%s/theories", tmpdir);
+    cbm_mkdir(path);
+
+    /* Base.v — a definition, an inductive with constructors, and a lemma. */
+    snprintf(path, sizeof(path), "%s/theories/Base.v", tmpdir);
+    f = fopen(path, "w");
+    ASSERT_NOT_NULL(f);
+    fprintf(f, "Definition base_id (n : nat) : nat := n.\n"
+               "Inductive color := Red | Green | Blue.\n"
+               "Lemma base_lem : forall n : nat, base_id n = n.\n"
+               "Proof. intros n. reflexivity. Qed.\n");
+    fclose(f);
+
+    /* Use.v — requires Base and its proof depends on base_lem / base_id. */
+    snprintf(path, sizeof(path), "%s/theories/Use.v", tmpdir);
+    f = fopen(path, "w");
+    ASSERT_NOT_NULL(f);
+    fprintf(f, "From MyDev Require Import Base.\n"
+               "Definition twice (n : nat) : nat := base_id (base_id n).\n"
+               "Theorem use_thm : forall n : nat, twice n = n.\n"
+               "Proof. intros n. unfold twice. rewrite base_lem. apply base_lem. Qed.\n");
+    fclose(f);
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/rocq.db", tmpdir);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmpdir, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+    const char *project = cbm_pipeline_project_name(p);
+
+    /* Function nodes: base_id, base_lem (Base.v); twice, use_thm (Use.v). */
+    cbm_node_t *funcs = NULL;
+    int fc = 0;
+    ASSERT_EQ(cbm_store_find_nodes_by_label(s, project, "Function", &funcs, &fc), CBM_STORE_OK);
+    ASSERT_NOT_NULL(find_node_named(funcs, fc, "base_id"));
+    ASSERT_NOT_NULL(find_node_named(funcs, fc, "base_lem"));
+    ASSERT_NOT_NULL(find_node_named(funcs, fc, "twice"));
+    ASSERT_NOT_NULL(find_node_named(funcs, fc, "use_thm"));
+    cbm_store_free_nodes(funcs, fc);
+
+    /* Inductive type + its constructors. */
+    cbm_node_t *types = NULL;
+    int tc = 0;
+    ASSERT_EQ(cbm_store_find_nodes_by_label(s, project, "Type", &types, &tc), CBM_STORE_OK);
+    ASSERT_NOT_NULL(find_node_named(types, tc, "color"));
+    cbm_store_free_nodes(types, tc);
+
+    cbm_node_t *methods = NULL;
+    int mc = 0;
+    ASSERT_EQ(cbm_store_find_nodes_by_label(s, project, "Method", &methods, &mc), CBM_STORE_OK);
+    ASSERT_NOT_NULL(find_node_named(methods, mc, "Red"));
+    cbm_store_free_nodes(methods, mc);
+
+    /* DEFINES for every definition; IMPORTS for the Require; CALLS for the
+     * proof/body dependencies. */
+    ASSERT_GTE(cbm_store_count_edges_by_type(s, project, "DEFINES"), 6);
+    ASSERT_GTE(cbm_store_count_edges_by_type(s, project, "IMPORTS"), 1);
+    ASSERT_GTE(cbm_store_count_edges_by_type(s, project, "CALLS"), 1);
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmpdir);
+    PASS();
+}
+
 SUITE(pipeline) {
     /* Index lock */
     RUN_TEST(pipeline_lock_try_acquire);
@@ -5697,6 +5788,8 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_complexity_transitive_loop_depth);
     /* Calls pass */
     RUN_TEST(pipeline_calls_resolution);
+    /* Rocq end-to-end (original front-end) */
+    RUN_TEST(pipeline_rocq_end_to_end);
     /* Git history pass */
     RUN_TEST(githistory_is_trackable);
     RUN_TEST(githistory_compute_coupling);

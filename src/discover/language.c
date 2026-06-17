@@ -771,6 +771,7 @@ static const char *LANG_NAMES[CBM_LANG_COUNT] = {
     [CBM_LANG_QML] = "QML",
     [CBM_LANG_CFSCRIPT] = "CFML",
     [CBM_LANG_CFML] = "CFML",
+    [CBM_LANG_ROCQ] = "Rocq",
     [CBM_LANG_JANET] = "Janet",
     [CBM_LANG_SWAY] = "Sway",
     [CBM_LANG_NASM] = "NASM",
@@ -1024,4 +1025,55 @@ CBMLanguage cbm_disambiguate_m(const char *path) {
     }
 
     return CBM_LANG_MATLAB;
+}
+
+/* ── .v file disambiguation (Verilog vs Rocq) ────────────────────── */
+
+/* Vernacular markers that never appear in Verilog source. */
+static bool has_rocq_strong_markers(const char *buf) {
+    return str_contains(buf, "Proof.") || str_contains(buf, "Qed.") ||
+           str_contains(buf, "Defined.") || str_contains(buf, "Admitted.") ||
+           str_contains(buf, "Theorem ") || str_contains(buf, "Lemma ") ||
+           str_contains(buf, "Inductive ") || str_contains(buf, "Fixpoint ") ||
+           str_contains(buf, "Require Import") || str_contains(buf, "Require Export");
+}
+
+/* Weaker markers shared in spirit but cased differently than Verilog keywords. */
+static bool has_rocq_soft_markers(const char *buf) {
+    return str_contains(buf, "Definition ") || str_contains(buf, "Require ") ||
+           str_contains(buf, "From ") || str_contains(buf, "Notation ") ||
+           str_contains(buf, "Module ") || str_contains(buf, "Section ") ||
+           str_contains(buf, "Ltac ");
+}
+
+static bool has_verilog_markers(const char *buf) {
+    return str_contains(buf, "module ") || str_contains(buf, "endmodule") ||
+           str_contains(buf, "always") || str_contains(buf, "reg ") ||
+           str_contains(buf, "wire ") || str_contains(buf, "assign ") ||
+           str_contains(buf, "posedge") || str_contains(buf, "`timescale") ||
+           str_contains(buf, "`include");
+}
+
+CBMLanguage cbm_disambiguate_v(const char *path) {
+    if (!path) {
+        return CBM_LANG_VERILOG;
+    }
+
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        return CBM_LANG_VERILOG;
+    }
+
+    char buf[CBM_SZ_4K + SKIP_ONE];
+    size_t n = fread(buf, SKIP_ONE, CBM_SZ_4K, f);
+    buf[n] = '\0';
+    (void)fclose(f);
+
+    if (has_rocq_strong_markers(buf)) {
+        return CBM_LANG_ROCQ;
+    }
+    if (has_rocq_soft_markers(buf) && !has_verilog_markers(buf)) {
+        return CBM_LANG_ROCQ;
+    }
+    return CBM_LANG_VERILOG;
 }

@@ -2537,6 +2537,14 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
                        pine_branch_types, pine_var_types, pine_assign_types, empty_types, NULL,
                        empty_types, NULL, NULL, tree_sitter_pine, NULL},
 
+    // CBM_LANG_ROCQ — parsed by the original hand-written front-end in
+    // internal/cbm/rocq/, not tree-sitter. This grammar-less entry exists only
+    // so the spec table stays sized to CBM_LANG_COUNT; cbm_extract_file routes
+    // Rocq away before any field here is read.
+    [CBM_LANG_ROCQ] = {CBM_LANG_ROCQ, empty_types, empty_types, empty_types, empty_types,
+                       empty_types, empty_types, empty_types, empty_types, empty_types,
+                       empty_types, empty_types, NULL, empty_types, empty_types, NULL, NULL, NULL},
+
 };
 
 _Static_assert(sizeof(lang_specs) / sizeof(lang_specs[0]) == CBM_LANG_COUNT,

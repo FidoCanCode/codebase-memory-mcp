@@ -12,6 +12,7 @@
 #include "lsp/java_lsp.h"
 #include "lsp/kotlin_lsp.h"
 #include "lsp/rust_lsp.h"
+#include "rocq/rocq_extract.h"
 #include "preprocessor.h"
 #include "foundation/compat.h"
 #include "tree_sitter/api.h" // TSParser, TSNode, TSTree, TSInput, TSLanguage, TSPoint, TSParseOptions, TSParseState
@@ -506,6 +507,13 @@ CBMFileResult *cbm_extract_file(const char *source, int source_len, CBMLanguage 
 
     cbm_arena_init(&result->arena);
     CBMArena *a = &result->arena;
+
+    // Rocq (.v) is parsed by an original hand-written front-end, not
+    // tree-sitter. Route around the grammar pipeline entirely.
+    if (language == CBM_LANG_ROCQ) {
+        cbm_rocq_extract_file(a, result, source, source_len, project, rel_path);
+        return result;
+    }
 
     // Get language spec
     const CBMLangSpec *spec = cbm_lang_spec(language);

@@ -39,6 +39,11 @@ const char *cbm_language_name(CBMLanguage lang);
  * On read failure, defaults to CBM_LANG_MATLAB. */
 CBMLanguage cbm_disambiguate_m(const char *path);
 
+/* Disambiguate .v files (shared by Verilog and Rocq) by reading first 4KB of
+ * content. Returns CBM_LANG_ROCQ when Rocq vernacular markers are present,
+ * otherwise CBM_LANG_VERILOG (the default). */
+CBMLanguage cbm_disambiguate_v(const char *path);
+
 /* ── Gitignore pattern matching ──────────────────────────────────── */
 
 typedef struct cbm_gitignore cbm_gitignore_t;
