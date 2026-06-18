@@ -277,6 +277,45 @@ TEST(rocq_qualified_name_call) {
     PASS();
 }
 
+/* ── dynamic notation resolution ───────────────────────────────── */
+
+TEST(rocq_notation_use_resolves) {
+    CBMFileResult *r = rocq("Notation \"x +++ y\" := (myadd x y).\n"
+                            "Definition f (a b : nat) := a +++ b.\n",
+                            "demo.v");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Function", "f"));
+    /* The notation use `a +++ b` resolves to myadd via the dynamic table. */
+    ASSERT(has_call_from(r, "myadd", "f"));
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(rocq_infix_notation_resolves) {
+    CBMFileResult *r = rocq("Infix \"<*>\" := mymul.\n"
+                            "Definition g (a b : nat) := a <*> b.\n",
+                            "demo.v");
+    ASSERT_NOT_NULL(r);
+    ASSERT(has_call_from(r, "mymul", "g"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* The dynamic, file-order property: a notation resolves uses that FOLLOW its
+ * declaration, but not uses that precede it. */
+TEST(rocq_notation_file_order) {
+    CBMFileResult *r = rocq("Definition early (a b : nat) := a @@@ b.\n"
+                            "Notation \"x @@@ y\" := (late_add x y).\n"
+                            "Definition later (a b : nat) := a @@@ b.\n",
+                            "demo.v");
+    ASSERT_NOT_NULL(r);
+    ASSERT(has_call_from(r, "late_add", "later"));      /* declared before use */
+    ASSERT_FALSE(has_call_from(r, "late_add", "early")); /* used before declared */
+    cbm_free_result(r);
+    PASS();
+}
+
 /* ── dune coq.theory logical→physical resolution ───────────────── */
 
 TEST(rocq_projmap_resolves_dune_theory) {
@@ -335,6 +374,9 @@ SUITE(rocq) {
     RUN_TEST(rocq_string_inside_comment);
     RUN_TEST(rocq_doubled_quote_string);
     RUN_TEST(rocq_qualified_name_call);
+    RUN_TEST(rocq_notation_use_resolves);
+    RUN_TEST(rocq_infix_notation_resolves);
+    RUN_TEST(rocq_notation_file_order);
     RUN_TEST(rocq_projmap_resolves_dune_theory);
     RUN_TEST(rocq_projmap_dune_dotted_name_and_root);
 }

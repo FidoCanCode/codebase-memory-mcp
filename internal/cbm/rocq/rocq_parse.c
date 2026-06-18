@@ -23,6 +23,16 @@ typedef struct {
     const char *name; // arena-owned
 } RpScope;
 
+// A user-defined notation's dynamic binding: the literal operator token of the
+// notation pattern (e.g. "+") mapped to the head identifier its RHS expands to
+// (e.g. "Nat.add"). The table is the parser's extensibility point — populated
+// when a Notation/Infix command is parsed, and consulted when resolving later
+// uses, so a notation only affects text that follows its declaration.
+typedef struct {
+    const char *op;     // arena-owned literal operator token
+    const char *target; // arena-owned head identifier of the expansion
+} RocqNotation;
+
 typedef struct {
     CBMArena *a;
     CBMFileResult *result;
@@ -40,6 +50,10 @@ typedef struct {
     // so a following `Proof.` attaches its body's references to it.
     int last_def_idx;
     const char *proof_owner; // arena-owned QN, non-NULL while harvesting a proof
+
+    RocqNotation *notations; // dynamic notation table (arena-grown), file-order
+    int notation_count;
+    int notation_cap;
 } RP;
 
 // ---- token stream with one-token lookahead --------------------------------
@@ -189,6 +203,90 @@ static bool is_filtered_callee(const char *t, int len) {
     return false;
 }
 
+// ---- dynamic notation table -----------------------------------------------
+
+// Emit a call to a resolved target name (arena-owned), not a source token.
+static void emit_call_name(RP *rp, const char *owner_qn, const char *name, int line) {
+    if (!owner_qn || !name) {
+        return;
+    }
+    CBMCall c = {0};
+    c.callee_name = name;
+    c.enclosing_func_qn = owner_qn;
+    c.start_line = line;
+    cbm_calls_push(&rp->result->calls, rp->a, c);
+}
+
+// Structural punctuation that is too common to safely treat as a notation
+// operator (a notation reusing ';'/','/etc. would otherwise match everywhere).
+static bool notation_op_too_common(const char *op, int len) {
+    if (len != 1) {
+        return false;
+    }
+    switch (op[0]) {
+    case ';':
+    case ',':
+    case ':':
+    case '|':
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void register_notation(RP *rp, const char *op, int oplen, const char *target) {
+    if (oplen <= 0 || !target || notation_op_too_common(op, oplen)) {
+        return;
+    }
+    if (rp->notation_count >= rp->notation_cap) {
+        int ncap = rp->notation_cap ? rp->notation_cap * 2 : 16;
+        RocqNotation *n = (RocqNotation *)cbm_arena_alloc(rp->a, (size_t)ncap * sizeof(RocqNotation));
+        if (!n) {
+            return;
+        }
+        if (rp->notations && rp->notation_count > 0) {
+            memcpy(n, rp->notations, (size_t)rp->notation_count * sizeof(RocqNotation));
+        }
+        rp->notations = n;
+        rp->notation_cap = ncap;
+    }
+    rp->notations[rp->notation_count].op = cbm_arena_strndup(rp->a, op, (size_t)oplen);
+    rp->notations[rp->notation_count].target = target;
+    rp->notation_count++;
+}
+
+// Most-recently-registered notation for an operator token wins (later
+// declarations shadow earlier ones), matching Rocq's file-order semantics.
+static const char *lookup_notation(RP *rp, const char *op, int oplen) {
+    for (int i = rp->notation_count - 1; i >= 0; i--) {
+        const char *o = rp->notations[i].op;
+        size_t n = strlen(o);
+        if ((size_t)oplen == n && memcmp(o, op, n) == 0) {
+            return rp->notations[i].target;
+        }
+    }
+    return NULL;
+}
+
+// Harvest one body/proof token as a dependency of owner_qn: an identifier
+// resolves by name (the registry resolves it later); a notation operator
+// resolves through the dynamic table to the definition it expands to.
+static void harvest_token(RP *rp, const char *owner_qn, RocqToken t) {
+    if (!owner_qn) {
+        return;
+    }
+    if (t.kind == ROCQ_TOK_IDENT) {
+        if (!is_filtered_callee(t.text, t.len)) {
+            emit_call(rp, owner_qn, t);
+        }
+    } else if (t.kind == ROCQ_TOK_SYMBOL) {
+        const char *tgt = lookup_notation(rp, t.text, t.len);
+        if (tgt) {
+            emit_call_name(rp, owner_qn, tgt, t.line);
+        }
+    }
+}
+
 // ---- scope management ------------------------------------------------------
 
 static void scope_push(RP *rp, RpScopeKind kind, RocqToken name) {
@@ -227,9 +325,7 @@ static int harvest_to_dot(RP *rp, const char *owner_qn) {
             return t.line ? t.line : last_line;
         }
         last_line = t.line;
-        if (t.kind == ROCQ_TOK_IDENT && owner_qn && !is_filtered_callee(t.text, t.len)) {
-            emit_call(rp, owner_qn, t);
-        }
+        harvest_token(rp, owner_qn, t);
     }
 }
 
@@ -259,10 +355,7 @@ static void h_define(RP *rp, const char *label) {
         if (u.kind == ROCQ_TOK_DOT || u.kind == ROCQ_TOK_EOF) {
             return;
         }
-        if (u.kind != ROCQ_TOK_IDENT) {
-            continue;
-        }
-        if (tok_eq(u, "with")) {
+        if (u.kind == ROCQ_TOK_IDENT && tok_eq(u, "with")) {
             RocqToken n2 = rp_peek(rp);
             if (n2.kind == ROCQ_TOK_IDENT) {
                 rp_next(rp);
@@ -272,9 +365,7 @@ static void h_define(RP *rp, const char *label) {
             }
             continue;
         }
-        if (!is_filtered_callee(u.text, u.len)) {
-            emit_call(rp, owner, u);
-        }
+        harvest_token(rp, owner, u);
     }
 }
 
@@ -411,28 +502,66 @@ static void h_ltac(RP *rp) {
 // Notation / Infix (label "Variable", low priority). Names the node after the
 // notation string literal; bodies are opaque.
 static void h_notation(RP *rp) {
+    // Pattern: Notation "<pattern>" := (<head> ...).  Capture the pattern string
+    // and the head identifier of the expansion, then register each literal
+    // operator in the pattern as a dynamic binding to that head.
     RocqToken str = {0};
-    bool have = false;
+    bool have_str = false;
+    bool seen_assign = false;
+    const char *target = NULL;
+    int target_line = 0;
     for (;;) {
         RocqToken u = rp_next(rp);
         if (u.kind == ROCQ_TOK_DOT || u.kind == ROCQ_TOK_EOF) {
             break;
         }
-        if (!have && u.kind == ROCQ_TOK_STRING && u.len >= 2) {
+        if (!have_str && u.kind == ROCQ_TOK_STRING && u.len >= 2) {
             str = u;
-            have = true;
+            have_str = true;
+            continue;
+        }
+        if (tok_is_assign(u)) {
+            seen_assign = true;
+            continue;
+        }
+        if (seen_assign && !target && u.kind == ROCQ_TOK_IDENT &&
+            !is_filtered_callee(u.text, u.len)) {
+            target = cbm_arena_strndup(rp->a, u.text, (size_t)u.len);
+            target_line = u.line;
         }
     }
-    if (have) {
-        // strip the surrounding quotes for the node name
+
+    int nidx = -1;
+    if (have_str) {
         RocqToken inner = str;
-        inner.text = str.text + 1;
+        inner.text = str.text + 1; // strip the surrounding quotes
         inner.len = str.len - 2;
         if (inner.len > 0) {
-            emit_def(rp, "Variable", inner, 0);
+            nidx = emit_def(rp, "Variable", inner, 0);
         }
     }
     rp->last_def_idx = -1;
+
+    if (have_str && target) {
+        // The notation node depends on the definition it expands to.
+        if (nidx >= 0) {
+            emit_call_name(rp, rp->result->defs.items[nidx].qualified_name, target, target_line);
+        }
+        // Register each literal operator token in the pattern. Re-lex the inner
+        // pattern: identifiers are notation parameters; SYMBOL runs are the
+        // literal operators that denote the expansion at use sites.
+        RocqLexer il;
+        rocq_lex_init(&il, str.text + 1, str.len - 2);
+        for (;;) {
+            RocqToken t = rocq_lex_next(&il);
+            if (t.kind == ROCQ_TOK_EOF) {
+                break;
+            }
+            if (t.kind == ROCQ_TOK_SYMBOL) {
+                register_notation(rp, t.text, t.len, target);
+            }
+        }
+    }
 }
 
 // Require [Import|Export] A.B C ...  — emit one import per logical module name.
@@ -666,9 +795,7 @@ void rocq_parse_file(CBMArena *a, CBMFileResult *result, const char *source, int
         // Not a recognized command. Inside a proof, the line is a tactic step:
         // harvest its references. The keyword token itself is a candidate too.
         if (rp.proof_owner) {
-            if (kw.kind == ROCQ_TOK_IDENT && !is_filtered_callee(kw.text, kw.len)) {
-                emit_call(&rp, rp.proof_owner, kw);
-            }
+            harvest_token(&rp, rp.proof_owner, kw);
             harvest_to_dot(&rp, rp.proof_owner);
         } else {
             skip_to_dot(&rp);
