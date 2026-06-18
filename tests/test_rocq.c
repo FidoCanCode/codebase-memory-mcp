@@ -358,6 +358,37 @@ TEST(rocq_projmap_dune_dotted_name_and_root) {
     PASS();
 }
 
+/* ── tactic notation + coercion ────────────────────────────────── */
+
+TEST(rocq_tactic_notation_is_function) {
+    CBMFileResult *r = rocq("Tactic Notation \"crush\" := (auto; eauto).\n"
+                            "Definition d := 0.\n",
+                            "demo.v");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Function", "crush")); /* the custom tactic is a Function node */
+    ASSERT(has_def(r, "Function", "d"));      /* the following command still parses */
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(rocq_coercion_emits_impl_trait) {
+    CBMFileResult *r = rocq("Coercion bool_to_nat : myBool >-> nat.\n", "demo.v");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    int saw = 0;
+    for (int i = 0; i < r->impl_traits.count; i++) {
+        const CBMImplTrait *it = &r->impl_traits.items[i];
+        if (it->struct_name && it->trait_name && strcmp(it->struct_name, "myBool") == 0 &&
+            strcmp(it->trait_name, "nat") == 0) {
+            saw = 1;
+        }
+    }
+    ASSERT(saw); /* A >-> B recorded as A coerces-to/implements B */
+    cbm_free_result(r);
+    PASS();
+}
+
 /* ── typeclasses ───────────────────────────────────────────────── */
 
 TEST(rocq_class_is_interface_instance_implements) {
@@ -491,4 +522,6 @@ SUITE(rocq) {
     RUN_TEST(rocq_logical_for_path);
     RUN_TEST(rocq_class_is_interface_instance_implements);
     RUN_TEST(rocq_instance_class_past_binders);
+    RUN_TEST(rocq_tactic_notation_is_function);
+    RUN_TEST(rocq_coercion_emits_impl_trait);
 }

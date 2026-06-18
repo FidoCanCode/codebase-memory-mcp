@@ -502,7 +502,7 @@ static void h_ltac(RP *rp) {
 
 // Notation / Infix (label "Variable", low priority). Names the node after the
 // notation string literal; bodies are opaque.
-static void h_notation(RP *rp) {
+static void h_notation(RP *rp, const char *node_label) {
     // Pattern: Notation "<pattern>" := (<head> ...).  Capture the pattern string
     // and the head identifier of the expansion, then register each literal
     // operator in the pattern as a dynamic binding to that head.
@@ -538,7 +538,7 @@ static void h_notation(RP *rp) {
         inner.text = str.text + 1; // strip the surrounding quotes
         inner.len = str.len - 2;
         if (inner.len > 0) {
-            nidx = emit_def(rp, "Variable", inner, 0);
+            nidx = emit_def(rp, node_label, inner, 0);
         }
     }
     rp->last_def_idx = -1;
@@ -649,6 +649,60 @@ static void h_end_proof(RP *rp) {
         rp->result->defs.items[rp->last_def_idx].end_line = (uint32_t)end_line;
     }
     rp->proof_owner = NULL;
+    rp->last_def_idx = -1;
+}
+
+// Tactic Notation "<pattern>" := (<tac> ...).  Defines a custom-syntax tactic;
+// model it as a Function node named after the pattern and register its literal
+// operators (so notation-style tactic uses resolve to the underlying tactic).
+static void h_tactic_notation(RP *rp) {
+    RocqToken n = rp_peek(rp);
+    if (tok_eq(n, "Notation")) {
+        rp_next(rp);
+        h_notation(rp, "Function");
+    } else {
+        skip_to_dot(rp);
+        rp->last_def_idx = -1;
+    }
+}
+
+// Coercion <name> : <A> >-> <B>.  Records that A coerces to B (a subtyping-like
+// relation), emitted as an impl-trait pair so pass_semantic links A IMPLEMENTS B
+// when both ends resolve. The leading '>' of the ">->" arrow separates A from B.
+static void h_coercion(RP *rp) {
+    const char *a_type = NULL;
+    const char *b_type = NULL;
+    bool seen_colon = false;
+    bool seen_arrow = false;
+    for (;;) {
+        RocqToken u = rp_next(rp);
+        if (u.kind == ROCQ_TOK_DOT || u.kind == ROCQ_TOK_EOF) {
+            break;
+        }
+        if (u.kind == ROCQ_TOK_SYMBOL && u.len == 1 && u.text[0] == ':') {
+            seen_colon = true;
+            continue;
+        }
+        if (u.kind == ROCQ_TOK_SYMBOL && u.len >= 2 && u.text[0] == '>') {
+            seen_arrow = true; // the ">->" coercion arrow
+            continue;
+        }
+        if (seen_colon && u.kind == ROCQ_TOK_IDENT && !is_filtered_callee(u.text, u.len)) {
+            if (!seen_arrow) {
+                if (!a_type) {
+                    a_type = cbm_arena_strndup(rp->a, u.text, (size_t)u.len);
+                }
+            } else if (!b_type) {
+                b_type = cbm_arena_strndup(rp->a, u.text, (size_t)u.len);
+            }
+        }
+    }
+    if (a_type && b_type) {
+        CBMImplTrait it = {0};
+        it.struct_name = a_type; // A implements/coerces-to B
+        it.trait_name = b_type;
+        cbm_impltrait_push(&rp->result->impl_traits, rp->a, it);
+    }
     rp->last_def_idx = -1;
 }
 
@@ -764,7 +818,15 @@ static bool dispatch_keyword(RP *rp, RocqToken kw) {
         return true;
     }
     if (tok_eq(kw, "Notation") || tok_eq(kw, "Infix")) {
-        h_notation(rp);
+        h_notation(rp, "Variable");
+        return true;
+    }
+    if (tok_eq(kw, "Tactic")) {
+        h_tactic_notation(rp);
+        return true;
+    }
+    if (tok_eq(kw, "Coercion")) {
+        h_coercion(rp);
         return true;
     }
     if (tok_eq(kw, "Require")) {
