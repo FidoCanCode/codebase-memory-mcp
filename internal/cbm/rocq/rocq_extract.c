@@ -35,5 +35,9 @@ void cbm_rocq_extract_file(CBMArena *a, CBMFileResult *result, const char *sourc
         }
     }
 
-    rocq_parse_file(a, result, source, source_len, result->module_qn, rel_path);
+    /* module_qn is NULL only if the arena couldn't allocate it (OOM); without a
+     * base QN there is nothing to anchor definitions to, so skip parsing. */
+    if (result->module_qn) {
+        rocq_parse_file(a, result, source, source_len, result->module_qn, rel_path);
+    }
 }

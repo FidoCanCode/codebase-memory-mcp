@@ -528,7 +528,7 @@ static bool dispatch_keyword(RP *rp, RocqToken kw) {
         tok_eq(kw, "Fixpoint") || tok_eq(kw, "CoFixpoint") || tok_eq(kw, "Function") ||
         tok_eq(kw, "Instance") || tok_eq(kw, "Theorem") || tok_eq(kw, "Lemma") ||
         tok_eq(kw, "Corollary") || tok_eq(kw, "Proposition") || tok_eq(kw, "Remark") ||
-        tok_eq(kw, "Fact") || tok_eq(kw, "Property") || tok_eq(kw, "Definition")) {
+        tok_eq(kw, "Fact") || tok_eq(kw, "Property")) {
         h_define(rp, "Function");
         return true;
     }
