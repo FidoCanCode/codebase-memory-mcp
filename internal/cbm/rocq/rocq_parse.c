@@ -373,14 +373,14 @@ static void h_define(RP *rp, const char *label) {
 typedef enum { RP_TYPE_INDUCTIVE, RP_TYPE_RECORD } RpTypeMode;
 
 // Inductive / Variant / Record / Class (label "Type" with "Method" children).
-static void h_type(RP *rp, RpTypeMode mode) {
+static void h_type(RP *rp, RpTypeMode mode, const char *type_label) {
     RocqToken t = rp_peek(rp);
     if (t.kind != ROCQ_TOK_IDENT) {
         skip_to_dot(rp);
         return;
     }
     RocqToken name = rp_next(rp);
-    int idx = emit_def(rp, "Type", name, 0);
+    int idx = emit_def(rp, type_label, name, 0);
     rp->last_def_idx = idx;
     const char *parent = rp->result->defs.items[idx].qualified_name;
 
@@ -423,7 +423,7 @@ static void h_type(RP *rp, RpTypeMode mode) {
             RocqToken n2 = rp_peek(rp);
             if (n2.kind == ROCQ_TOK_IDENT) {
                 rp_next(rp);
-                int j = emit_def(rp, "Type", n2, 0);
+                int j = emit_def(rp, type_label, n2, 0);
                 parent = rp->result->defs.items[j].qualified_name;
                 rp->last_def_idx = j;
             }
@@ -652,22 +652,92 @@ static void h_end_proof(RP *rp) {
     rp->last_def_idx = -1;
 }
 
+// Instance (label "Function"): a typeclass instance. Captures the class being
+// instantiated — the head of the type after the top-level ':' — as a base
+// class, which pass_semantic turns into an IMPLEMENTS edge to the Class
+// (Interface). The body is harvested for calls like any definition.
+static void h_instance(RP *rp) {
+    RocqToken t = rp_peek(rp);
+    while (t.kind != ROCQ_TOK_IDENT && t.kind != ROCQ_TOK_DOT && t.kind != ROCQ_TOK_EOF) {
+        rp_next(rp);
+        t = rp_peek(rp);
+    }
+    if (t.kind != ROCQ_TOK_IDENT) {
+        skip_to_dot(rp);
+        rp->last_def_idx = -1;
+        return;
+    }
+    RocqToken name = rp_next(rp);
+    int idx = emit_def(rp, "Function", name, 0);
+    rp->last_def_idx = idx;
+    const char *owner = rp->result->defs.items[idx].qualified_name;
+
+    int depth = 0;
+    bool want_class = false;
+    const char *class_name = NULL;
+    for (;;) {
+        RocqToken u = rp_next(rp);
+        if (u.kind == ROCQ_TOK_DOT || u.kind == ROCQ_TOK_EOF) {
+            break;
+        }
+        if (u.kind == ROCQ_TOK_LPAREN || u.kind == ROCQ_TOK_LBRACE || u.kind == ROCQ_TOK_LBRACK) {
+            depth++;
+            continue;
+        }
+        if (u.kind == ROCQ_TOK_RPAREN || u.kind == ROCQ_TOK_RBRACE || u.kind == ROCQ_TOK_RBRACK) {
+            if (depth > 0) {
+                depth--;
+            }
+            continue;
+        }
+        // The top-level ':' (not part of binders) introduces the class type.
+        if (depth == 0 && !want_class && !class_name && u.kind == ROCQ_TOK_SYMBOL && u.len == 1 &&
+            u.text[0] == ':') {
+            want_class = true;
+            continue;
+        }
+        if (want_class && !class_name && depth == 0 && u.kind == ROCQ_TOK_IDENT &&
+            !is_filtered_callee(u.text, u.len)) {
+            class_name = cbm_arena_strndup(rp->a, u.text, (size_t)u.len);
+            want_class = false;
+        }
+        harvest_token(rp, owner, u);
+    }
+    if (class_name) {
+        const char **bc = (const char **)cbm_arena_alloc(rp->a, 2 * sizeof(char *));
+        if (bc) {
+            bc[0] = class_name;
+            bc[1] = NULL;
+            rp->result->defs.items[idx].base_classes = bc;
+        }
+    }
+}
+
 // Returns true if the keyword token was dispatched as a known command.
 static bool dispatch_keyword(RP *rp, RocqToken kw) {
     if (tok_eq(kw, "Definition") || tok_eq(kw, "Let") || tok_eq(kw, "Example") ||
         tok_eq(kw, "Fixpoint") || tok_eq(kw, "CoFixpoint") || tok_eq(kw, "Function") ||
-        tok_eq(kw, "Instance") || tok_eq(kw, "Theorem") || tok_eq(kw, "Lemma") ||
-        tok_eq(kw, "Corollary") || tok_eq(kw, "Proposition") || tok_eq(kw, "Remark") ||
-        tok_eq(kw, "Fact") || tok_eq(kw, "Property")) {
+        tok_eq(kw, "Theorem") || tok_eq(kw, "Lemma") || tok_eq(kw, "Corollary") ||
+        tok_eq(kw, "Proposition") || tok_eq(kw, "Remark") || tok_eq(kw, "Fact") ||
+        tok_eq(kw, "Property")) {
         h_define(rp, "Function");
         return true;
     }
-    if (tok_eq(kw, "Inductive") || tok_eq(kw, "CoInductive") || tok_eq(kw, "Variant")) {
-        h_type(rp, RP_TYPE_INDUCTIVE);
+    if (tok_eq(kw, "Instance")) {
+        h_instance(rp);
         return true;
     }
-    if (tok_eq(kw, "Record") || tok_eq(kw, "Structure") || tok_eq(kw, "Class")) {
-        h_type(rp, RP_TYPE_RECORD);
+    if (tok_eq(kw, "Inductive") || tok_eq(kw, "CoInductive") || tok_eq(kw, "Variant")) {
+        h_type(rp, RP_TYPE_INDUCTIVE, "Type");
+        return true;
+    }
+    if (tok_eq(kw, "Record") || tok_eq(kw, "Structure")) {
+        h_type(rp, RP_TYPE_RECORD, "Type");
+        return true;
+    }
+    if (tok_eq(kw, "Class")) {
+        // A typeclass models an interface: instances IMPLEMENT it.
+        h_type(rp, RP_TYPE_RECORD, "Interface");
         return true;
     }
     if (tok_eq(kw, "Module")) {

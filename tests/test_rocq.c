@@ -358,6 +358,45 @@ TEST(rocq_projmap_dune_dotted_name_and_root) {
     PASS();
 }
 
+/* ── typeclasses ───────────────────────────────────────────────── */
+
+TEST(rocq_class_is_interface_instance_implements) {
+    CBMFileResult *r = rocq("Class Eq (a : Type) := { eqb : a -> a -> bool }.\n"
+                            "Instance nat_eq : Eq nat := { eqb := Nat.eqb }.\n",
+                            "demo.v");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    /* A typeclass is modeled as an Interface; its method is a child. */
+    ASSERT(has_def(r, "Interface", "Eq"));
+    ASSERT(has_def(r, "Method", "eqb"));
+    /* The instance is a Function whose base class is the typeclass it instantiates. */
+    CBMDefinition *inst = find_def(r, "Function", "nat_eq");
+    ASSERT_NOT_NULL(inst);
+    ASSERT_NOT_NULL(inst->base_classes);
+    int saw = 0;
+    for (const char **b = inst->base_classes; *b; b++) {
+        if (strcmp(*b, "Eq") == 0) {
+            saw = 1;
+        }
+    }
+    ASSERT(saw);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* The class head is found past binders (the binder colon must not be mistaken
+ * for the class-introducing colon). */
+TEST(rocq_instance_class_past_binders) {
+    CBMFileResult *r = rocq("Instance li (A : Type) : Container (list A) := {}.\n", "demo.v");
+    ASSERT_NOT_NULL(r);
+    CBMDefinition *inst = find_def(r, "Function", "li");
+    ASSERT_NOT_NULL(inst);
+    ASSERT_NOT_NULL(inst->base_classes);
+    ASSERT_STR_EQ(inst->base_classes[0], "Container");
+    cbm_free_result(r);
+    PASS();
+}
+
 /* ── cross-file notation primitives ────────────────────────────── */
 
 TEST(rocq_scan_extracts_notations_and_requires) {
@@ -450,4 +489,6 @@ SUITE(rocq) {
     RUN_TEST(rocq_scan_extracts_notations_and_requires);
     RUN_TEST(rocq_seeddb_basic);
     RUN_TEST(rocq_logical_for_path);
+    RUN_TEST(rocq_class_is_interface_instance_implements);
+    RUN_TEST(rocq_instance_class_past_binders);
 }

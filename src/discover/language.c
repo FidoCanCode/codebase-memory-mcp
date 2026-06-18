@@ -1038,12 +1038,18 @@ static bool has_rocq_strong_markers(const char *buf) {
            str_contains(buf, "Require Import") || str_contains(buf, "Require Export");
 }
 
-/* Weaker markers shared in spirit but cased differently than Verilog keywords. */
+/* Weaker markers shared in spirit but cased differently than Verilog keywords.
+ * Includes the capitalized vernacular heads (Class/Instance/Record/...) so a
+ * file made up only of typeclass or structure declarations is still detected. */
 static bool has_rocq_soft_markers(const char *buf) {
     return str_contains(buf, "Definition ") || str_contains(buf, "Require ") ||
            str_contains(buf, "From ") || str_contains(buf, "Notation ") ||
            str_contains(buf, "Module ") || str_contains(buf, "Section ") ||
-           str_contains(buf, "Ltac ");
+           str_contains(buf, "Ltac ") || str_contains(buf, "Class ") ||
+           str_contains(buf, "Instance ") || str_contains(buf, "Record ") ||
+           str_contains(buf, "Structure ") || str_contains(buf, "Variant ") ||
+           str_contains(buf, "Parameter ") || str_contains(buf, "Axiom ") ||
+           str_contains(buf, "Canonical ") || str_contains(buf, "Coercion ");
 }
 
 static bool has_verilog_markers(const char *buf) {
