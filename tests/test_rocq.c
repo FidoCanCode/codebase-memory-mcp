@@ -8,7 +8,9 @@
  */
 #include "test_framework.h"
 #include "cbm.h"
+#include "arena.h"
 #include "rocq/rocq_project.h"
+#include "rocq/rocq_notation.h"
 
 #include <string.h>
 
@@ -356,6 +358,72 @@ TEST(rocq_projmap_dune_dotted_name_and_root) {
     PASS();
 }
 
+/* ── cross-file notation primitives ────────────────────────────── */
+
+TEST(rocq_scan_extracts_notations_and_requires) {
+    CBMArena a;
+    cbm_arena_init(&a);
+    const char *src = "Notation \"x +++ y\" := (myadd x y).\n"
+                      "From MyDev Require Import Base Extra.\n"
+                      "Require Import Coq.Lists.List.\n";
+    RocqFileScan fs;
+    rocq_scan_file(&a, src, (int)strlen(src), &fs);
+
+    int found_op = 0;
+    for (int i = 0; i < fs.notation_count; i++) {
+        if (strcmp(fs.notations[i].op, "+++") == 0 && strcmp(fs.notations[i].target, "myadd") == 0) {
+            found_op = 1;
+        }
+    }
+    ASSERT(found_op);
+
+    int found_base = 0, found_list = 0;
+    for (int i = 0; i < fs.require_count; i++) {
+        if (strcmp(fs.requires[i], "MyDev.Base") == 0) {
+            found_base = 1;
+        }
+        if (strcmp(fs.requires[i], "Coq.Lists.List") == 0) {
+            found_list = 1;
+        }
+    }
+    ASSERT(found_base);
+    ASSERT(found_list);
+
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
+TEST(rocq_seeddb_basic) {
+    RocqSeedDB *db = rocq_seeddb_new();
+    rocq_seeddb_add(db, "f.v", "@@", "tgt");
+    rocq_seeddb_add(db, "f.v", "@@", "tgt"); /* duplicate ignored */
+    rocq_seeddb_add(db, "f.v", "##", "tgt2");
+
+    const RocqNotationEntry *e = NULL;
+    ASSERT_EQ(rocq_seeddb_lookup(db, "f.v", &e), 2);
+    ASSERT_NOT_NULL(e);
+    ASSERT_EQ(rocq_seeddb_lookup(db, "none.v", &e), 0);
+    rocq_seeddb_free(db);
+    PASS();
+}
+
+TEST(rocq_logical_for_path) {
+    RocqProjMap m;
+    rocq_projmap_init(&m);
+    const char *d = "(coq.theory (name MyDev))";
+    rocq_projmap_add_dune(&m, "theories", d, (int)strlen(d));
+
+    char out[256];
+    ASSERT(rocq_projmap_logical_for_path(&m, "theories/Base.v", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "MyDev.Base");
+    ASSERT(rocq_projmap_logical_for_path(&m, "theories/Sub/Mod.v", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "MyDev.Sub.Mod");
+    /* A path outside any theory root has no logical name. */
+    ASSERT_FALSE(rocq_projmap_logical_for_path(&m, "other/x.v", out, sizeof(out)));
+    rocq_projmap_free(&m);
+    PASS();
+}
+
 /* ── Suite ─────────────────────────────────────────────────────── */
 
 SUITE(rocq) {
@@ -379,4 +447,7 @@ SUITE(rocq) {
     RUN_TEST(rocq_notation_file_order);
     RUN_TEST(rocq_projmap_resolves_dune_theory);
     RUN_TEST(rocq_projmap_dune_dotted_name_and_root);
+    RUN_TEST(rocq_scan_extracts_notations_and_requires);
+    RUN_TEST(rocq_seeddb_basic);
+    RUN_TEST(rocq_logical_for_path);
 }
