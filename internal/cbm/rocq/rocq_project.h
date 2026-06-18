@@ -38,4 +38,11 @@ void rocq_projmap_add_dune(RocqProjMap *m, const char *dir, const char *text, in
 // (capacity outsz) and returns true; otherwise returns false.
 bool rocq_projmap_resolve(const RocqProjMap *m, const char *logical, char *out, int outsz);
 
+// Inverse of resolve: given a repo-relative `.v` path, compute its logical
+// dotted module name (e.g. "theories/Sub/Mod.v" -> "MyDev.Sub.Mod") using the
+// most specific matching theory root. Writes into `out` and returns true on a
+// match; false if no theory root covers the path.
+bool rocq_projmap_logical_for_path(const RocqProjMap *m, const char *rel_path, char *out,
+                                   int outsz);
+
 #endif // CBM_ROCQ_PROJECT_H

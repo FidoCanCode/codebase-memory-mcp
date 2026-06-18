@@ -14,7 +14,8 @@
 #include "discover/discover.h"
 #include "foundation/hash_table.h"
 #include "cbm.h"
-#include "rocq/rocq_project.h" /* RocqProjMap — dune load-path resolution */
+#include "rocq/rocq_project.h"  /* RocqProjMap — dune load-path resolution */
+#include "rocq/rocq_notation.h" /* RocqSeedDB — cross-file notation seeding */
 #include "lsp/go_lsp.h" /* CBMLSPDef for cbm_parallel_resolve cross-LSP inputs */
 #include <stdatomic.h>
 
@@ -133,7 +134,13 @@ CBMHashTable *cbm_pkgmap_build_from_files(const cbm_file_info_t *files, int file
 /* Build the Rocq dune coq.theory load-path map from the discovered files
  * (scans `dune` / `dune-project`). Caller owns the result; free with
  * rocq_projmap_free() + free(). Returns NULL on allocation failure. */
-RocqProjMap *cbm_rocq_projmap_build_from_repo(const cbm_file_info_t *files, int file_count);
+RocqProjMap *cbm_rocq_projmap_build_from_repo(const char *repo_path);
+
+/* Build the per-file cross-file notation seed table: scans every .v file's
+ * notations + Require's, resolves logical module names via the dune map, and
+ * records the notations each file inherits from its imports. Caller owns the
+ * result; free with rocq_seeddb_free(). */
+RocqSeedDB *cbm_rocq_seeddb_build_from_repo(const cbm_file_info_t *files, int file_count);
 
 /* Free pkgmap and all owned strings. */
 void cbm_pkgmap_free(CBMHashTable *pkgmap);

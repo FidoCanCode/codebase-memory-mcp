@@ -3,6 +3,7 @@
 // rocq_parse.c — see rocq_parse.h. Original hand-written Vernacular parser.
 #include "rocq/rocq_parse.h"
 #include "rocq/rocq_lex.h"
+#include "rocq/rocq_notation.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -783,6 +784,19 @@ void rocq_parse_file(CBMArena *a, CBMFileResult *result, const char *source, int
     rp.rel_path = rel_path ? cbm_arena_strdup(a, rel_path) : NULL;
     rp.last_def_idx = -1;
     rocq_lex_init(&rp.lx, source, source_len);
+
+    // Seed notations imported from Require'd modules (resolved cross-file by the
+    // pre-pass), so notation uses resolve across files. The file's own notations
+    // layer on top in file order as they are parsed.
+    const RocqSeedDB *seeddb = cbm_rocq_get_seeddb();
+    if (seeddb && rp.rel_path) {
+        const RocqNotationEntry *seed = NULL;
+        int sn = rocq_seeddb_lookup(seeddb, rp.rel_path, &seed);
+        for (int i = 0; i < sn; i++) {
+            register_notation(&rp, seed[i].op, (int)strlen(seed[i].op),
+                              cbm_arena_strdup(a, seed[i].target));
+        }
+    }
 
     for (;;) {
         RocqToken kw = read_command_keyword(&rp);

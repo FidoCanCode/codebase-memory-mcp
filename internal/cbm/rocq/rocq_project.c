@@ -152,3 +152,50 @@ bool rocq_projmap_resolve(const RocqProjMap *m, const char *logical, char *out, 
     n += snprintf(out + n, (size_t)(outsz - n > 0 ? outsz - n : 0), ".v");
     return n > 0 && n < outsz;
 }
+
+bool rocq_projmap_logical_for_path(const RocqProjMap *m, const char *rel_path, char *out,
+                                   int outsz) {
+    if (!m || !rel_path || outsz <= 0) {
+        return false;
+    }
+    // Most specific (longest physdir) theory root that contains the path.
+    int best = -1;
+    size_t best_len = 0;
+    size_t rl = strlen(rel_path);
+    for (int i = 0; i < m->count; i++) {
+        const char *pd = m->entries[i].physdir;
+        size_t pl = strlen(pd);
+        bool match = (pl == 0) || (rl > pl && strncmp(rel_path, pd, pl) == 0 && rel_path[pl] == '/');
+        if (match && (best < 0 || pl > best_len)) {
+            best = i;
+            best_len = pl;
+        }
+    }
+    if (best < 0) {
+        return false;
+    }
+    const RocqProjEntry *e = &m->entries[best];
+    size_t pl = strlen(e->physdir);
+    const char *under = rel_path + (pl ? pl + 1 : 0); // path beneath the theory root
+    size_t ul = strlen(under);
+    if (ul >= 2 && under[ul - 2] == '.' && under[ul - 1] == 'v') {
+        ul -= 2; // strip ".v"
+    }
+
+    int n = 0;
+    if (e->logical[0]) {
+        n += snprintf(out + n, (size_t)(outsz - n), "%s", e->logical);
+    }
+    if (ul > 0) {
+        if (n > 0 && n < outsz) {
+            out[n++] = '.';
+        }
+        for (size_t k = 0; k < ul && n < outsz - 1; k++) {
+            out[n++] = (under[k] == '/') ? '.' : under[k];
+        }
+    }
+    if (n < outsz) {
+        out[n] = '\0';
+    }
+    return n > 0 && n < outsz;
+}

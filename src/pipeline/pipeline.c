@@ -967,7 +967,9 @@ static int run_extraction_phase(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
 
     /* Build the Rocq dune coq.theory load-path map once, before extraction, so
      * the definitions pass can resolve `.v` Require imports to exact files. */
-    cbm_pipeline_set_rocq_projmap(cbm_rocq_projmap_build_from_repo(files, file_count));
+    cbm_pipeline_set_rocq_projmap(cbm_rocq_projmap_build_from_repo(ctx->repo_path));
+    // Then the cross-file notation seed (uses the load-path map above).
+    cbm_rocq_set_seeddb(cbm_rocq_seeddb_build_from_repo(files, file_count));
 
     int worker_count = cbm_default_worker_count(true);
     CBM_PROF_START(t_extract_total);
@@ -1082,6 +1084,8 @@ cleanup:
             free(rpm);
         }
         cbm_pipeline_set_rocq_projmap(NULL);
+        rocq_seeddb_free((RocqSeedDB *)cbm_rocq_get_seeddb());
+        cbm_rocq_set_seeddb(NULL);
     }
     cbm_discover_free(files, file_count);
     cbm_gbuf_free(p->gbuf);

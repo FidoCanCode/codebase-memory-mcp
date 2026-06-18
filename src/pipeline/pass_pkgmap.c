@@ -1010,38 +1010,153 @@ void cbm_pkgmap_free(CBMHashTable *pkgmap) {
 
 /* ── Rocq dune load-path map ───────────────────────────────────── */
 
-RocqProjMap *cbm_rocq_projmap_build_from_repo(const cbm_file_info_t *files, int file_count) {
+// dune/dune-project files carry no language, so the discoverer filters them
+// out — walk the filesystem directly (like cbm_pkgmap_scan_repo) to find them.
+static void rocq_dune_walk_dir(const char *abs_dir, const char *rel_dir, RocqProjMap *m,
+                               int depth) {
+    if (depth >= PKGMAP_WALK_MAX_DEPTH) {
+        return;
+    }
+    cbm_dir_t *dir = cbm_opendir(abs_dir);
+    if (!dir) {
+        return;
+    }
+    cbm_dirent_t *entry;
+    while ((entry = cbm_readdir(dir)) != NULL) {
+        const char *name = entry->name;
+        if (name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'))) {
+            continue;
+        }
+        char abs_path[PKGMAP_PATH_BUF];
+        char rel_path[PKGMAP_PATH_BUF];
+        snprintf(abs_path, sizeof(abs_path), "%s/%s", abs_dir, name);
+        if (rel_dir && rel_dir[0]) {
+            snprintf(rel_path, sizeof(rel_path), "%s/%s", rel_dir, name);
+        } else {
+            snprintf(rel_path, sizeof(rel_path), "%s", name);
+        }
+        struct stat st;
+        if (pkgmap_safe_stat(abs_path, &st) != 0) {
+            continue;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            if (cbm_should_skip_dir(name, CBM_MODE_FULL)) {
+                continue;
+            }
+#ifdef _WIN32
+            if (pkgmap_is_reparse_point(abs_path)) {
+                continue;
+            }
+#endif
+            rocq_dune_walk_dir(abs_path, rel_path, m, depth + 1);
+            continue;
+        }
+        if (!S_ISREG(st.st_mode)) {
+            continue;
+        }
+        if (strcmp(name, "dune") != 0 && strcmp(name, "dune-project") != 0) {
+            continue;
+        }
+        int source_len = 0;
+        char *source = pkgmap_read_file(abs_path, &source_len);
+        if (!source) {
+            continue;
+        }
+        // The theory root is the directory containing the dune file.
+        rocq_projmap_add_dune(m, rel_dir ? rel_dir : "", source, source_len);
+        free(source);
+    }
+    cbm_closedir(dir);
+}
+
+RocqProjMap *cbm_rocq_projmap_build_from_repo(const char *repo_path) {
     RocqProjMap *m = (RocqProjMap *)malloc(sizeof(*m));
     if (!m) {
         return NULL;
     }
     rocq_projmap_init(m);
-    for (int i = 0; i < file_count; i++) {
-        const char *base = path_basename(files[i].rel_path);
-        if (strcmp(base, "dune") != 0 && strcmp(base, "dune-project") != 0) {
-            continue;
-        }
-        int source_len = 0;
-        char *source = pkgmap_read_file(files[i].path, &source_len);
-        if (!source) {
-            continue;
-        }
-        /* Repo-relative directory containing the dune file ("" at the root). */
-        char dir[1024];
-        size_t dlen = (size_t)(base - files[i].rel_path);
-        if (dlen > 0 && dlen < sizeof(dir)) {
-            if (files[i].rel_path[dlen - 1] == '/') {
-                dlen--; /* drop the separator */
-            }
-            memcpy(dir, files[i].rel_path, dlen);
-            dir[dlen] = '\0';
-        } else {
-            dir[0] = '\0';
-        }
-        rocq_projmap_add_dune(m, dir, source, source_len);
-        free(source);
+    if (repo_path) {
+        rocq_dune_walk_dir(repo_path, "", m, 0);
     }
     return m;
+}
+
+/* ── Rocq cross-file notation seed ─────────────────────────────── */
+
+RocqSeedDB *cbm_rocq_seeddb_build_from_repo(const cbm_file_info_t *files, int file_count) {
+    RocqSeedDB *db = rocq_seeddb_new();
+    if (!db) {
+        return NULL;
+    }
+    const RocqProjMap *pm = cbm_pipeline_get_rocq_projmap();
+
+    int nf = 0;
+    for (int i = 0; i < file_count; i++) {
+        if (files[i].language == CBM_LANG_ROCQ) {
+            nf++;
+        }
+    }
+    if (nf == 0) {
+        return db;
+    }
+
+    typedef struct {
+        const char *rel;
+        char *logical;
+        RocqFileScan scan;
+    } RInfo;
+    RInfo *fi = (RInfo *)calloc((size_t)nf, sizeof(RInfo));
+    if (!fi) {
+        return db;
+    }
+
+    CBMArena arena;
+    cbm_arena_init(&arena);
+
+    // Pass 1: scan each Rocq file's notations + requires, and its logical name.
+    int k = 0;
+    for (int i = 0; i < file_count && k < nf; i++) {
+        if (files[i].language != CBM_LANG_ROCQ) {
+            continue;
+        }
+        fi[k].rel = files[i].rel_path;
+        fi[k].logical = NULL;
+        memset(&fi[k].scan, 0, sizeof(RocqFileScan));
+        int len = 0;
+        char *src = pkgmap_read_file(files[i].path, &len);
+        if (src) {
+            rocq_scan_file(&arena, src, len, &fi[k].scan);
+            free(src);
+        }
+        char lbuf[1024];
+        if (pm && rocq_projmap_logical_for_path(pm, files[i].rel_path, lbuf, (int)sizeof(lbuf))) {
+            fi[k].logical = strdup(lbuf);
+        }
+        k++;
+    }
+
+    // Pass 2: each file inherits the notations of the modules it requires.
+    for (int b = 0; b < nf; b++) {
+        for (int r = 0; r < fi[b].scan.require_count; r++) {
+            const char *req = fi[b].scan.requires[r];
+            for (int s = 0; s < nf; s++) {
+                if (s == b || !fi[s].logical || strcmp(fi[s].logical, req) != 0) {
+                    continue;
+                }
+                for (int e = 0; e < fi[s].scan.notation_count; e++) {
+                    rocq_seeddb_add(db, fi[b].rel, fi[s].scan.notations[e].op,
+                                    fi[s].scan.notations[e].target);
+                }
+            }
+        }
+    }
+
+    for (int b = 0; b < nf; b++) {
+        free(fi[b].logical);
+    }
+    free(fi);
+    cbm_arena_destroy(&arena);
+    return db;
 }
 
 /* ── Resolver ──────────────────────────────────────────────────── */

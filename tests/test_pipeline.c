@@ -5789,6 +5789,78 @@ TEST(pipeline_rocq_end_to_end) {
     PASS();
 }
 
+/* Cross-file notation: a notation declared in one module resolves at use sites
+ * in another module that Require-imports it (via the dune load path + the
+ * per-file notation seed). */
+TEST(pipeline_rocq_cross_file_notation) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cbm_rocqxf_XXXXXX");
+    if (!cbm_mkdtemp(tmpdir)) {
+        FAIL("failed to create temp dir");
+    }
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/theories", tmpdir);
+    cbm_mkdir(path);
+    snprintf(path, sizeof(path), "%s/theories/dune", tmpdir);
+    FILE *f = fopen(path, "w");
+    ASSERT_NOT_NULL(f);
+    fprintf(f, "(coq.theory (name NX))\n");
+    fclose(f);
+
+    /* Defs.v defines base_op and a notation for it. */
+    snprintf(path, sizeof(path), "%s/theories/Defs.v", tmpdir);
+    f = fopen(path, "w");
+    ASSERT_NOT_NULL(f);
+    fprintf(f, "Definition base_op (a b : nat) : nat := a.\n"
+               "Notation \"x ## y\" := (base_op x y).\n");
+    fclose(f);
+
+    /* Use.v requires Defs and uses the ## notation — must resolve to base_op. */
+    snprintf(path, sizeof(path), "%s/theories/Use.v", tmpdir);
+    f = fopen(path, "w");
+    ASSERT_NOT_NULL(f);
+    fprintf(f, "From NX Require Import Defs.\n"
+               "Definition useit (a b : nat) : nat := a ## b.\n");
+    fclose(f);
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/xf.db", tmpdir);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmpdir, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+    const char *project = cbm_pipeline_project_name(p);
+
+    /* A CALLS edge useit -> base_op must exist, created purely by the imported
+     * ## notation (no direct textual reference to base_op in Use.v). */
+    cbm_edge_t *edges = NULL;
+    int ec = 0;
+    cbm_store_find_edges_by_type(s, project, "CALLS", &edges, &ec);
+    int found = 0;
+    for (int i = 0; i < ec; i++) {
+        cbm_node_t src = {0}, tgt = {0};
+        if (cbm_store_find_node_by_id(s, edges[i].source_id, &src) == CBM_STORE_OK &&
+            cbm_store_find_node_by_id(s, edges[i].target_id, &tgt) == CBM_STORE_OK && src.name &&
+            tgt.name && strcmp(src.name, "useit") == 0 && strcmp(tgt.name, "base_op") == 0) {
+            found = 1;
+        }
+        cbm_node_free_fields(&src);
+        cbm_node_free_fields(&tgt);
+    }
+    if (edges) {
+        cbm_store_free_edges(edges, ec);
+    }
+    ASSERT_TRUE(found);
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmpdir);
+    PASS();
+}
+
 SUITE(pipeline) {
     /* Index lock */
     RUN_TEST(pipeline_lock_try_acquire);
@@ -5822,6 +5894,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_calls_resolution);
     /* Rocq end-to-end (original front-end) */
     RUN_TEST(pipeline_rocq_end_to_end);
+    RUN_TEST(pipeline_rocq_cross_file_notation);
     /* Git history pass */
     RUN_TEST(githistory_is_trackable);
     RUN_TEST(githistory_compute_coupling);

@@ -133,6 +133,7 @@ EXTRACTION_SRCS = \
     $(CBM_DIR)/rocq/rocq_lex.c \
     $(CBM_DIR)/rocq/rocq_parse.c \
     $(CBM_DIR)/rocq/rocq_project.c \
+    $(CBM_DIR)/rocq/rocq_notation.c \
     $(CBM_DIR)/rocq/rocq_extract.c
 
 # LSP resolvers (compiled as one unit via lsp_all.c)
