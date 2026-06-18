@@ -102,19 +102,37 @@ static void scan_notation(CBMArena *a, RocqLexer *lx, RocqNotationEntry **nots, 
     }
 }
 
-static void scan_require(CBMArena *a, RocqLexer *lx, const char ***reqs, int *rc, int *rcap) {
+// Record a required module; if `is_export`, also record it as re-exported.
+static void add_require(CBMArena *a, RocqFileScan *out, int *rcap, int *ecap, const char *nm,
+                        bool is_export) {
+    push_require(a, &out->requires, &out->require_count, rcap, nm);
+    if (is_export) {
+        push_require(a, &out->exports, &out->export_count, ecap, nm);
+    }
+}
+
+static void scan_require(CBMArena *a, RocqLexer *lx, RocqFileScan *out, int *rcap, int *ecap) {
+    bool is_export = false;
     for (;;) {
         RocqToken u = rocq_lex_next(lx);
         if (u.kind == ROCQ_TOK_DOT || u.kind == ROCQ_TOK_EOF) {
             return;
         }
-        if (u.kind == ROCQ_TOK_IDENT && !teq(u, "Import") && !teq(u, "Export")) {
-            push_require(a, reqs, rc, rcap, cbm_arena_strndup(a, u.text, (size_t)u.len));
+        if (u.kind != ROCQ_TOK_IDENT) {
+            continue;
         }
+        if (teq(u, "Export")) {
+            is_export = true;
+            continue;
+        }
+        if (teq(u, "Import")) {
+            continue;
+        }
+        add_require(a, out, rcap, ecap, cbm_arena_strndup(a, u.text, (size_t)u.len), is_export);
     }
 }
 
-static void scan_from(CBMArena *a, RocqLexer *lx, const char ***reqs, int *rc, int *rcap) {
+static void scan_from(CBMArena *a, RocqLexer *lx, RocqFileScan *out, int *rcap, int *ecap) {
     RocqToken pfx = rocq_lex_next(lx);
     if (pfx.kind != ROCQ_TOK_IDENT) {
         while (pfx.kind != ROCQ_TOK_DOT && pfx.kind != ROCQ_TOK_EOF) {
@@ -132,17 +150,43 @@ static void scan_from(CBMArena *a, RocqLexer *lx, const char ***reqs, int *rc, i
             break;
         }
     }
+    bool is_export = false;
     for (;;) {
         RocqToken u = rocq_lex_next(lx);
         if (u.kind == ROCQ_TOK_DOT || u.kind == ROCQ_TOK_EOF) {
             return;
         }
-        if (u.kind == ROCQ_TOK_IDENT && !teq(u, "Import") && !teq(u, "Export")) {
-            char buf[512];
-            int n = snprintf(buf, sizeof(buf), "%.*s.%.*s", pfx.len, pfx.text, u.len, u.text);
-            if (n > 0) {
-                push_require(a, reqs, rc, rcap, cbm_arena_strndup(a, buf, (size_t)(n < (int)sizeof(buf) ? n : (int)sizeof(buf) - 1)));
-            }
+        if (u.kind != ROCQ_TOK_IDENT) {
+            continue;
+        }
+        if (teq(u, "Export")) {
+            is_export = true;
+            continue;
+        }
+        if (teq(u, "Import")) {
+            continue;
+        }
+        char buf[512];
+        int n = snprintf(buf, sizeof(buf), "%.*s.%.*s", pfx.len, pfx.text, u.len, u.text);
+        if (n > 0) {
+            add_require(a, out, rcap, ecap,
+                        cbm_arena_strndup(a, buf, (size_t)(n < (int)sizeof(buf) ? n : (int)sizeof(buf) - 1)),
+                        is_export);
+        }
+    }
+}
+
+// Standalone `Import M.` / `Export M.` (opening already-required modules). An
+// Export re-exports to importers; both make the named modules visible here.
+static void scan_open(CBMArena *a, RocqLexer *lx, RocqFileScan *out, int *rcap, int *ecap,
+                      bool is_export) {
+    for (;;) {
+        RocqToken u = rocq_lex_next(lx);
+        if (u.kind == ROCQ_TOK_DOT || u.kind == ROCQ_TOK_EOF) {
+            return;
+        }
+        if (u.kind == ROCQ_TOK_IDENT) {
+            add_require(a, out, rcap, ecap, cbm_arena_strndup(a, u.text, (size_t)u.len), is_export);
         }
     }
 }
@@ -161,7 +205,9 @@ void rocq_scan_file(CBMArena *a, const char *src, int len, RocqFileScan *out) {
     out->notation_count = 0;
     out->requires = NULL;
     out->require_count = 0;
-    int ncap = 0, rcap = 0;
+    out->exports = NULL;
+    out->export_count = 0;
+    int ncap = 0, rcap = 0, ecap = 0;
 
     RocqLexer lx;
     rocq_lex_init(&lx, src, len);
@@ -188,11 +234,19 @@ void rocq_scan_file(CBMArena *a, const char *src, int len, RocqFileScan *out) {
                 continue;
             }
             if (teq(t, "Require")) {
-                scan_require(a, &lx, &out->requires, &out->require_count, &rcap);
+                scan_require(a, &lx, out, &rcap, &ecap);
                 continue;
             }
             if (teq(t, "From")) {
-                scan_from(a, &lx, &out->requires, &out->require_count, &rcap);
+                scan_from(a, &lx, out, &rcap, &ecap);
+                continue;
+            }
+            if (teq(t, "Import")) {
+                scan_open(a, &lx, out, &rcap, &ecap, false);
+                continue;
+            }
+            if (teq(t, "Export")) {
+                scan_open(a, &lx, out, &rcap, &ecap, true);
                 continue;
             }
         }

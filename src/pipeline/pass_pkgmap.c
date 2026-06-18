@@ -1083,6 +1083,41 @@ RocqProjMap *cbm_rocq_projmap_build_from_repo(const char *repo_path) {
 
 /* ── Rocq cross-file notation seed ─────────────────────────────── */
 
+typedef struct {
+    const char *rel;
+    char *logical;
+    RocqFileScan scan;
+} RocqScanInfo;
+
+static int rocq_find_by_logical(const RocqScanInfo *fi, int nf, const char *logical) {
+    if (!logical) {
+        return -1;
+    }
+    for (int i = 0; i < nf; i++) {
+        if (fi[i].logical && strcmp(fi[i].logical, logical) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// Add module s's notations, plus those of every module it (transitively)
+// Re-Exports, to file `rel`'s seed. `visited` guards against export cycles.
+static void rocq_seed_closure(const RocqScanInfo *fi, int nf, int s, RocqSeedDB *db,
+                              const char *rel, char *visited) {
+    if (s < 0 || s >= nf || !visited || visited[s]) {
+        return;
+    }
+    visited[s] = 1;
+    for (int e = 0; e < fi[s].scan.notation_count; e++) {
+        rocq_seeddb_add(db, rel, fi[s].scan.notations[e].op, fi[s].scan.notations[e].target);
+    }
+    for (int x = 0; x < fi[s].scan.export_count; x++) {
+        rocq_seed_closure(fi, nf, rocq_find_by_logical(fi, nf, fi[s].scan.exports[x]), db, rel,
+                          visited);
+    }
+}
+
 RocqSeedDB *cbm_rocq_seeddb_build_from_repo(const cbm_file_info_t *files, int file_count) {
     RocqSeedDB *db = rocq_seeddb_new();
     if (!db) {
@@ -1100,12 +1135,7 @@ RocqSeedDB *cbm_rocq_seeddb_build_from_repo(const cbm_file_info_t *files, int fi
         return db;
     }
 
-    typedef struct {
-        const char *rel;
-        char *logical;
-        RocqFileScan scan;
-    } RInfo;
-    RInfo *fi = (RInfo *)calloc((size_t)nf, sizeof(RInfo));
+    RocqScanInfo *fi = (RocqScanInfo *)calloc((size_t)nf, sizeof(RocqScanInfo));
     if (!fi) {
         return db;
     }
@@ -1135,21 +1165,21 @@ RocqSeedDB *cbm_rocq_seeddb_build_from_repo(const cbm_file_info_t *files, int fi
         k++;
     }
 
-    // Pass 2: each file inherits the notations of the modules it requires.
+    // Pass 2: each file inherits the export-closure of notations from every
+    // module it requires (so notations re-exported through intermediate modules
+    // resolve, not just directly-required ones).
+    char *visited = (char *)malloc(nf > 0 ? (size_t)nf : 1);
     for (int b = 0; b < nf; b++) {
+        if (visited) {
+            memset(visited, 0, (size_t)nf);
+            visited[b] = 1; // never pull a file's notations from itself
+        }
         for (int r = 0; r < fi[b].scan.require_count; r++) {
-            const char *req = fi[b].scan.requires[r];
-            for (int s = 0; s < nf; s++) {
-                if (s == b || !fi[s].logical || strcmp(fi[s].logical, req) != 0) {
-                    continue;
-                }
-                for (int e = 0; e < fi[s].scan.notation_count; e++) {
-                    rocq_seeddb_add(db, fi[b].rel, fi[s].scan.notations[e].op,
-                                    fi[s].scan.notations[e].target);
-                }
-            }
+            int s = rocq_find_by_logical(fi, nf, fi[b].scan.requires[r]);
+            rocq_seed_closure(fi, nf, s, db, fi[b].rel, visited);
         }
     }
+    free(visited);
 
     for (int b = 0; b < nf; b++) {
         free(fi[b].logical);

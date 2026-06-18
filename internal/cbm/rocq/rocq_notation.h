@@ -24,6 +24,8 @@ typedef struct {
     int notation_count;
     const char **requires; // logical module names the file Require's (e.g. "MyDev.Base")
     int require_count;
+    const char **exports; // subset re-exported (Require Export / Export) to importers
+    int export_count;
 } RocqFileScan;
 
 // Scan a .v source for its notation bindings and Require'd module names.

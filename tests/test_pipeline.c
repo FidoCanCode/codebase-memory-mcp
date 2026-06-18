@@ -5861,6 +5861,79 @@ TEST(pipeline_rocq_cross_file_notation) {
     PASS();
 }
 
+/* Transitive notation: A defines a notation, M re-exports A, B imports M and
+ * uses the notation — it must resolve through the Require Export chain. */
+TEST(pipeline_rocq_transitive_notation) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cbm_rocqtr_XXXXXX");
+    if (!cbm_mkdtemp(tmpdir)) {
+        FAIL("failed to create temp dir");
+    }
+    char path[512];
+    snprintf(path, sizeof(path), "%s/theories", tmpdir);
+    cbm_mkdir(path);
+    snprintf(path, sizeof(path), "%s/theories/dune", tmpdir);
+    FILE *f = fopen(path, "w");
+    ASSERT_NOT_NULL(f);
+    fprintf(f, "(coq.theory (name TR))\n");
+    fclose(f);
+
+    snprintf(path, sizeof(path), "%s/theories/A.v", tmpdir);
+    f = fopen(path, "w");
+    ASSERT_NOT_NULL(f);
+    fprintf(f, "Definition aop (x y : nat) : nat := x.\n"
+               "Notation \"x %%%% y\" := (aop x y).\n"); /* prints as: x %% y */
+    fclose(f);
+
+    snprintf(path, sizeof(path), "%s/theories/M.v", tmpdir);
+    f = fopen(path, "w");
+    ASSERT_NOT_NULL(f);
+    fprintf(f, "Require Export TR.A.\n"); /* re-exports A's notation */
+    fclose(f);
+
+    snprintf(path, sizeof(path), "%s/theories/B.v", tmpdir);
+    f = fopen(path, "w");
+    ASSERT_NOT_NULL(f);
+    fprintf(f, "Require Import TR.M.\n"
+               "Definition useb (x y : nat) : nat := x %%%% y.\n");
+    fclose(f);
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/tr.db", tmpdir);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmpdir, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+    const char *project = cbm_pipeline_project_name(p);
+
+    /* useb -> aop via the notation re-exported through M. */
+    cbm_edge_t *edges = NULL;
+    int ec = 0;
+    cbm_store_find_edges_by_type(s, project, "CALLS", &edges, &ec);
+    int found = 0;
+    for (int i = 0; i < ec; i++) {
+        cbm_node_t src = {0}, tgt = {0};
+        if (cbm_store_find_node_by_id(s, edges[i].source_id, &src) == CBM_STORE_OK &&
+            cbm_store_find_node_by_id(s, edges[i].target_id, &tgt) == CBM_STORE_OK && src.name &&
+            tgt.name && strcmp(src.name, "useb") == 0 && strcmp(tgt.name, "aop") == 0) {
+            found = 1;
+        }
+        cbm_node_free_fields(&src);
+        cbm_node_free_fields(&tgt);
+    }
+    if (edges) {
+        cbm_store_free_edges(edges, ec);
+    }
+    ASSERT_TRUE(found);
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmpdir);
+    PASS();
+}
+
 /* Typeclasses: a Class is an Interface and an Instance IMPLEMENTS it. */
 TEST(pipeline_rocq_typeclass_implements) {
     char tmpdir[256];
@@ -5945,6 +6018,7 @@ SUITE(pipeline) {
     /* Rocq end-to-end (original front-end) */
     RUN_TEST(pipeline_rocq_end_to_end);
     RUN_TEST(pipeline_rocq_cross_file_notation);
+    RUN_TEST(pipeline_rocq_transitive_notation);
     RUN_TEST(pipeline_rocq_typeclass_implements);
     /* Git history pass */
     RUN_TEST(githistory_is_trackable);
