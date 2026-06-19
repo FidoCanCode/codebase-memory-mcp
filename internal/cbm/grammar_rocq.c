@@ -43,6 +43,7 @@ static const char *const rocq_symbol_names[RSYM_COUNT] = {
     [RSYM_MODULE_TYPE] = "module_type",
     [RSYM_SECTION] = "section",
     [RSYM_REQUIRE] = "require",
+    [RSYM_FROM_REQUIRE] = "from_require",
     [RSYM_IMPORT] = "import",
     [RSYM_NOTATION] = "notation",
     [RSYM_TACTIC] = "tactic_notation",
@@ -76,6 +77,7 @@ static const TSSymbolMetadata rocq_symbol_metadata[RSYM_COUNT] = {
     [RSYM_MODULE_TYPE] = {.visible = true, .named = true, .supertype = false},
     [RSYM_SECTION] = {.visible = true, .named = true, .supertype = false},
     [RSYM_REQUIRE] = {.visible = true, .named = true, .supertype = false},
+    [RSYM_FROM_REQUIRE] = {.visible = true, .named = true, .supertype = false},
     [RSYM_IMPORT] = {.visible = true, .named = true, .supertype = false},
     [RSYM_NOTATION] = {.visible = true, .named = true, .supertype = false},
     [RSYM_TACTIC] = {.visible = true, .named = true, .supertype = false},
@@ -87,8 +89,8 @@ static const TSSymbolMetadata rocq_symbol_metadata[RSYM_COUNT] = {
 
 // Identity public-symbol map (we expose internal symbols directly).
 static const TSSymbol rocq_public_symbol_map[RSYM_COUNT] = {
-    0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13,
-    14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
+    0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14,
+    15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
 };
 
 // Alias map: none (one entry per symbol, all zero = no aliases).

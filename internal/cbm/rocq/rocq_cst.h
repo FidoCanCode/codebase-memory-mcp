@@ -37,6 +37,7 @@ typedef enum {
     RSYM_MODULE_TYPE,
     RSYM_SECTION,
     RSYM_REQUIRE,
+    RSYM_FROM_REQUIRE, // `From <prefix> Require …` — first child is the prefix
     RSYM_IMPORT,
     RSYM_NOTATION,
     RSYM_TACTIC,

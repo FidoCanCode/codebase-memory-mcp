@@ -176,7 +176,7 @@ static const char *rocq_func_types[] = {"definition", "theorem", "instance", "ta
 static const char *rocq_class_types[] = {"inductive", "record", "class", NULL};
 static const char *rocq_field_types[] = {"constructor", "field_def", NULL};
 static const char *rocq_module_types[] = {"module", "module_type", "section", NULL};
-static const char *rocq_import_types[] = {"require", "import", NULL};
+static const char *rocq_import_types[] = {"require", "from_require", "import", NULL};
 static const char *rocq_var_types[] = {"assumption", "notation", NULL};
 
 // ==================== GO ====================

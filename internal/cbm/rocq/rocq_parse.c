@@ -479,8 +479,11 @@ static void h_from(RP *rp) {
             break;
         }
     }
-    rocq_tb_open(rp->tb, RSYM_REQUIRE, RPROD_NAME);
-    tb_leaf_tok(rp, ident_sym_of(pfx), pfx); // prefix @ child 0 (name field)
+    // Distinct symbol (not a field) so the node has production 0: it has variable
+    // arity (prefix + N modules), and a non-zero production would make the tree
+    // builder's alias-sequence indexing overrun. The prefix is simply child 0.
+    rocq_tb_open(rp->tb, RSYM_FROM_REQUIRE, RPROD_NONE);
+    tb_leaf_tok(rp, ident_sym_of(pfx), pfx); // prefix @ child 0
     for (;;) {
         RocqToken u = rp_next(rp);
         if (u.kind == ROCQ_TOK_DOT || u.kind == ROCQ_TOK_EOF) {

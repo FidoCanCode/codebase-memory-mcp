@@ -471,30 +471,34 @@ static void emit_import_path(RW *rw, const char *path) {
     cbm_imports_push(&rw->result->imports, rw->a, imp);
 }
 
-static void handle_require(RW *rw, TSNode node) {
-    // A `From X Require …` node keeps a `name` field (the prefix X) and so has a
-    // non-zero production with variable arity; a TSTreeCursor would read its
-    // (absent) alias sequence, so iterate by index here. Require lists are short,
-    // so the O(i) indexed access is fine.
-    TSNode prefix = field_name(node);
-    char *pfx = ts_node_is_null(prefix) ? NULL : node_text(rw, prefix);
-    uint32_t cc = ts_node_named_child_count(node);
-    for (uint32_t i = 0; i < cc; i++) {
-        TSNode ch = ts_node_named_child(node, i);
-        if (!ts_node_is_null(prefix)) {
-            if (ts_node_eq(ch, prefix)) {
-                continue; // the From-prefix itself
-            }
-            char *mod = node_text(rw, ch);
+// Emit imports for a `Require`/`Import` (is_from=false: each child is a complete
+// module path) or a `From <prefix> Require` (is_from=true: child 0 is the prefix,
+// prepended to each remaining module). Both node types have production 0, so the
+// cursor walk (O(1)/step) is safe.
+static void handle_require(RW *rw, TSNode node, bool is_from) {
+    char *pfx = NULL;
+    bool first = true;
+    TSTreeCursor cur = ts_tree_cursor_new(node);
+    for (bool ok = ts_tree_cursor_goto_first_child(&cur); ok;
+         ok = ts_tree_cursor_goto_next_sibling(&cur)) {
+        TSNode ch = ts_tree_cursor_current_node(&cur);
+        if (is_from && first) {
+            pfx = node_text(rw, ch); // the From-prefix (may be NULL under OOM)
+            first = false;
+            continue;
+        }
+        char *mod = node_text(rw, ch);
+        if (is_from) {
             if (pfx && mod) {
                 char buf[RW_QN_BUF];
                 snprintf(buf, sizeof(buf), "%s.%s", pfx, mod);
                 emit_import_path(rw, cbm_arena_strdup(rw->a, buf));
             }
         } else {
-            emit_import_path(rw, node_text(rw, ch));
+            emit_import_path(rw, mod);
         }
     }
+    ts_tree_cursor_delete(&cur);
 }
 
 // Attribute a proof's harvested references to the most recent proof-bearing def,
@@ -550,7 +554,10 @@ static void walk_command(RW *rw, TSNode node, const char *scope) {
         break;
     case RSYM_REQUIRE:
     case RSYM_IMPORT:
-        handle_require(rw, node);
+        handle_require(rw, node, false);
+        break;
+    case RSYM_FROM_REQUIRE:
+        handle_require(rw, node, true);
         break;
     case RSYM_PROOF:
         handle_proof(rw, node);
