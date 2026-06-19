@@ -178,7 +178,7 @@ static void h_type(RP *rp, RpTypeMode mode, RocqSymbol type_sym) {
         skip_to_dot(rp);
         return;
     }
-    rocq_tb_open(rp->tb, type_sym, RPROD_NAME);
+    rocq_tb_open(rp->tb, type_sym, RPROD_NONE); // variable arity (name + members) → no field
     RocqToken name = rp_next(rp);
     tb_leaf_tok(rp, RSYM_IDENT, name);
 
@@ -223,7 +223,7 @@ static void h_type(RP *rp, RpTypeMode mode, RocqSymbol type_sym) {
             if (n2.kind == ROCQ_TOK_IDENT) {
                 rocq_tb_close(rp->tb); // close current type
                 rp_next(rp);
-                rocq_tb_open(rp->tb, type_sym, RPROD_NAME);
+                rocq_tb_open(rp->tb, type_sym, RPROD_NONE); // variable arity (name + members) → no field
                 tb_leaf_tok(rp, RSYM_IDENT, n2);
             }
             child_next = false;
@@ -251,7 +251,7 @@ static void h_module(RP *rp, RocqSymbol container_sym, bool is_section) {
         skip_to_dot(rp);
         return;
     }
-    rocq_tb_open(rp->tb, sym, RPROD_NAME);
+    rocq_tb_open(rp->tb, sym, RPROD_NONE); // variable arity (name + body) → no field
     RocqToken name = rp_next(rp);
     tb_leaf_tok(rp, RSYM_IDENT, name);
 

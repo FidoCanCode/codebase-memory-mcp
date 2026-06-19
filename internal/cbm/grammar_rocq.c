@@ -94,6 +94,14 @@ static const TSSymbol rocq_public_symbol_map[RSYM_COUNT] = {
 // Alias map: none (one entry per symbol, all zero = no aliases).
 static const TSSymbol rocq_alias_map[1] = {0};
 
+// Alias sequences: we use no child aliases, but a TSTreeCursor reads
+// alias_sequences[production_id * max_alias_sequence_length + child_index] for
+// every visited child, so this must be a valid (zero) array large enough for the
+// field-bearing productions' bounded child counts. Variable-arity nodes use
+// production 0 (RPROD_NONE), for which the lookup short-circuits to 0.
+enum { ROCQ_MAX_ALIAS_SEQ_LEN = 3 };
+static const TSSymbol rocq_alias_sequences[RPROD_COUNT * ROCQ_MAX_ALIAS_SEQ_LEN] = {0};
+
 // Field names, indexed by RocqField (index 0 unused).
 static const char *const rocq_field_names[RFLD_COUNT] = {
     [RFLD_NONE] = (void *)0,
@@ -139,7 +147,7 @@ static const TSLanguage rocq_language = {
     .large_state_count = 0,
     .production_id_count = RPROD_COUNT,
     .field_count = RFLD_COUNT - 1,
-    .max_alias_sequence_length = 0,
+    .max_alias_sequence_length = ROCQ_MAX_ALIAS_SEQ_LEN,
     .parse_table = (void *)0,
     .small_parse_table = (void *)0,
     .small_parse_table_map = (void *)0,
@@ -151,7 +159,7 @@ static const TSLanguage rocq_language = {
     .symbol_metadata = rocq_symbol_metadata,
     .public_symbol_map = rocq_public_symbol_map,
     .alias_map = rocq_alias_map,
-    .alias_sequences = (void *)0,
+    .alias_sequences = rocq_alias_sequences,
     .lex_modes = (void *)0,
     .lex_fn = (void *)0,
     .keyword_lex_fn = (void *)0,

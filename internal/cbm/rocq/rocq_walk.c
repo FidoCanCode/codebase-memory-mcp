@@ -203,9 +203,14 @@ static void harvest_calls(RW *rw, TSNode n, TSNode skip, const char *owner) {
         }
         return;
     }
-    for (uint32_t i = 0; i < cc; i++) {
-        harvest_calls(rw, ts_node_child(n, i), skip, owner);
+    // Walk children with a cursor (O(1)/step). ts_node_child(n, i) is O(i), so an
+    // indexed loop would make a wide node (e.g. a long proof body) O(n^2).
+    TSTreeCursor cur = ts_tree_cursor_new(n);
+    for (bool ok = ts_tree_cursor_goto_first_child(&cur); ok;
+         ok = ts_tree_cursor_goto_next_sibling(&cur)) {
+        harvest_calls(rw, ts_tree_cursor_current_node(&cur), skip, owner);
     }
+    ts_tree_cursor_delete(&cur);
 }
 
 // ---- per-node handlers -----------------------------------------------------
@@ -245,9 +250,9 @@ static void handle_define(RW *rw, TSNode node, const char *scope) {
 // Inductive / Variant / Record / Class. `member_label` unused — members are
 // always "Method"; `type_label` distinguishes Type vs Interface.
 static void handle_type(RW *rw, TSNode node, const char *scope, const char *type_label) {
-    TSNode nm = field_name(node);
-    // The parser always emits the name leaf as the node's name field, so nm is
-    // non-null here; node_text still returns NULL if its arena copy fails (OOM).
+    // The type node has production 0 (variable arity: name + members), so its name
+    // is the first child (the parser always emits it first), not a named field.
+    TSNode nm = ts_node_named_child(node, 0); // child 0 → O(1)
     char *name = node_text(rw, nm);
     if (!name) {
         return;
@@ -256,14 +261,18 @@ static void handle_type(RW *rw, TSNode node, const char *scope, const char *type
     emit_def(rw, name, type_qn, type_label, line_of(nm), (int)ts_node_end_point(node).row + 1);
     rw->last_def_idx = -1;
 
-    uint32_t cc = ts_node_named_child_count(node);
-    for (uint32_t i = 0; i < cc; i++) {
-        TSNode ch = ts_node_named_child(node, i);
+    // Cursor walk (O(1)/step): indexed child access is O(i), quadratic for a type
+    // with many constructors/fields.
+    TSTreeCursor cur = ts_tree_cursor_new(node);
+    for (bool ok = ts_tree_cursor_goto_first_child(&cur); ok;
+         ok = ts_tree_cursor_goto_next_sibling(&cur)) {
+        TSNode ch = ts_tree_cursor_current_node(&cur);
         TSSymbol s = ts_node_symbol(ch);
         if (s == RSYM_CONSTRUCTOR || s == RSYM_FIELD_DEF) {
             emit_type_member(rw, ch, type_qn);
         }
     }
+    ts_tree_cursor_delete(&cur);
 }
 
 // Instance (label "Function"): the `class` head becomes a base class (an
@@ -306,9 +315,9 @@ static void handle_instance(RW *rw, TSNode node, const char *scope) {
 static void walk_children(RW *rw, TSNode parent, const char *scope);
 
 static void handle_module(RW *rw, TSNode node, const char *scope) {
-    TSNode nm = field_name(node);
-    // The parser always emits the name leaf as the node's name field, so nm is
-    // non-null here; node_text still returns NULL if its arena copy fails (OOM).
+    // The module node has production 0 (variable arity: name + body), so its name
+    // is the first child (the parser always emits it first), not a named field.
+    TSNode nm = ts_node_named_child(node, 0); // child 0 → O(1)
     char *name = node_text(rw, nm);
     if (!name) {
         return;
@@ -366,17 +375,18 @@ static void handle_notation_or_tactic(RW *rw, TSNode node, const char *scope, bo
     // The expansion head: first identifier under the term following `:=`.
     const char *target = NULL;
     int target_line = 0;
-    uint32_t cc = ts_node_named_child_count(node);
-    // The term (if any) is the last child, so finding the head ident exits the
-    // loop via i >= cc on the next iteration; no `&& !target` guard is needed.
-    for (uint32_t i = 0; i < cc; i++) {
-        TSNode ch = ts_node_named_child(node, i);
+    // Cursor walk (O(1)/step) to find the term child, then its first identifier.
+    TSTreeCursor cur = ts_tree_cursor_new(node);
+    for (bool ok = ts_tree_cursor_goto_first_child(&cur); ok;
+         ok = ts_tree_cursor_goto_next_sibling(&cur)) {
+        TSNode ch = ts_tree_cursor_current_node(&cur);
         if (ts_node_symbol(ch) != RSYM_TERM) {
             continue;
         }
-        uint32_t tc = ts_node_named_child_count(ch);
-        for (uint32_t j = 0; j < tc; j++) {
-            TSNode tok = ts_node_named_child(ch, j);
+        TSTreeCursor tcur = ts_tree_cursor_new(ch);
+        for (bool ok2 = ts_tree_cursor_goto_first_child(&tcur); ok2;
+             ok2 = ts_tree_cursor_goto_next_sibling(&tcur)) {
+            TSNode tok = ts_tree_cursor_current_node(&tcur);
             TSSymbol s = ts_node_symbol(tok);
             if (s == RSYM_IDENT || s == RSYM_QUALID) {
                 char *t = node_text(rw, tok);
@@ -387,7 +397,12 @@ static void handle_notation_or_tactic(RW *rw, TSNode node, const char *scope, bo
                 }
             }
         }
+        ts_tree_cursor_delete(&tcur);
+        if (target) {
+            break;
+        }
     }
+    ts_tree_cursor_delete(&cur);
 
     if (target) {
         if (nidx >= 0) {
@@ -410,13 +425,14 @@ static void handle_notation_or_tactic(RW *rw, TSNode node, const char *scope, bo
 
 // Coercion: two ident leaves (A, B) ⇒ an A-implements/coerces-to-B edge.
 static void handle_coercion(RW *rw, TSNode node) {
-    uint32_t cc = ts_node_named_child_count(node);
     const char *a = NULL;
     const char *b = NULL;
-    for (uint32_t i = 0; i < cc; i++) {
-        // The parser emits exactly two ident/qualid leaves in a coercion node;
-        // node_text only returns NULL on OOM.
-        char *t = node_text(rw, ts_node_named_child(node, i));
+    // The parser emits exactly two ident/qualid leaves in a coercion node;
+    // node_text only returns NULL on OOM. Cursor walk (O(1)/step).
+    TSTreeCursor cur = ts_tree_cursor_new(node);
+    for (bool ok = ts_tree_cursor_goto_first_child(&cur); ok;
+         ok = ts_tree_cursor_goto_next_sibling(&cur)) {
+        char *t = node_text(rw, ts_tree_cursor_current_node(&cur));
         if (!t) {
             continue;
         }
@@ -427,6 +443,7 @@ static void handle_coercion(RW *rw, TSNode node) {
             break;
         }
     }
+    ts_tree_cursor_delete(&cur);
     if (a && b) {
         CBMImplTrait it = {0};
         it.struct_name = a;
@@ -455,14 +472,18 @@ static void emit_import_path(RW *rw, const char *path) {
 }
 
 static void handle_require(RW *rw, TSNode node) {
+    // A `From X Require …` node keeps a `name` field (the prefix X) and so has a
+    // non-zero production with variable arity; a TSTreeCursor would read its
+    // (absent) alias sequence, so iterate by index here. Require lists are short,
+    // so the O(i) indexed access is fine.
     TSNode prefix = field_name(node);
+    char *pfx = ts_node_is_null(prefix) ? NULL : node_text(rw, prefix);
     uint32_t cc = ts_node_named_child_count(node);
-    if (!ts_node_is_null(prefix)) {
-        char *pfx = node_text(rw, prefix);
-        for (uint32_t i = 0; i < cc; i++) {
-            TSNode ch = ts_node_named_child(node, i);
+    for (uint32_t i = 0; i < cc; i++) {
+        TSNode ch = ts_node_named_child(node, i);
+        if (!ts_node_is_null(prefix)) {
             if (ts_node_eq(ch, prefix)) {
-                continue; // the prefix itself
+                continue; // the From-prefix itself
             }
             char *mod = node_text(rw, ch);
             if (pfx && mod) {
@@ -470,11 +491,9 @@ static void handle_require(RW *rw, TSNode node) {
                 snprintf(buf, sizeof(buf), "%s.%s", pfx, mod);
                 emit_import_path(rw, cbm_arena_strdup(rw->a, buf));
             }
+        } else {
+            emit_import_path(rw, node_text(rw, ch));
         }
-        return;
-    }
-    for (uint32_t i = 0; i < cc; i++) {
-        emit_import_path(rw, node_text(rw, ts_node_named_child(node, i)));
     }
 }
 
@@ -542,10 +561,14 @@ static void walk_command(RW *rw, TSNode node, const char *scope) {
 }
 
 static void walk_children(RW *rw, TSNode parent, const char *scope) {
-    uint32_t cc = ts_node_named_child_count(parent);
-    for (uint32_t i = 0; i < cc; i++) {
-        walk_command(rw, ts_node_named_child(parent, i), scope);
+    // Cursor walk (O(1)/step): a file/module with many top-level commands would be
+    // O(n^2) under indexed child access (ts_node_named_child is O(i)).
+    TSTreeCursor cur = ts_tree_cursor_new(parent);
+    for (bool ok = ts_tree_cursor_goto_first_child(&cur); ok;
+         ok = ts_tree_cursor_goto_next_sibling(&cur)) {
+        walk_command(rw, ts_tree_cursor_current_node(&cur), scope);
     }
+    ts_tree_cursor_delete(&cur);
 }
 
 // cbm_rocq_extract_file calls this only with a non-null tree (inside `if (tree)`)
