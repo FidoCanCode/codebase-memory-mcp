@@ -8,7 +8,8 @@
  */
 #include "discover/discover.h"
 #include "discover/userconfig.h"
-#include "cbm.h" // CBMLanguage, CBM_LANG_*
+#include "cbm.h"               // CBMLanguage, CBM_LANG_*
+#include "rocq/rocq_detect.h"  // cbm_rocq_count_decls (Rocq vs Verilog for .v)
 
 #include "foundation/constants.h"
 
@@ -1029,36 +1030,83 @@ CBMLanguage cbm_disambiguate_m(const char *path) {
 
 /* ── .v file disambiguation (Verilog vs Rocq) ────────────────────── */
 
-/* Vernacular markers that never appear in Verilog source. */
-static bool has_rocq_strong_markers(const char *buf) {
-    return str_contains(buf, "Proof.") || str_contains(buf, "Qed.") ||
-           str_contains(buf, "Defined.") || str_contains(buf, "Admitted.") ||
-           str_contains(buf, "Theorem ") || str_contains(buf, "Lemma ") ||
-           str_contains(buf, "Inductive ") || str_contains(buf, "Fixpoint ") ||
-           str_contains(buf, "Require Import") || str_contains(buf, "Require Export");
+/* Whole-token line-anchored match: `kw` appears at `p` and is not just the
+ * prefix of a longer identifier. */
+static bool line_starts_with_token(const char *p, const char *kw, size_t klen) {
+    if (strncmp(p, kw, klen) != 0) {
+        return false;
+    }
+    unsigned char c = (unsigned char)p[klen];
+    return !(isalnum(c) || c == '_');
 }
 
-/* Weaker markers shared in spirit but cased differently than Verilog keywords.
- * Includes the capitalized vernacular heads (Class/Instance/Record/...) so a
- * file made up only of typeclass or structure declarations is still detected. */
-static bool has_rocq_soft_markers(const char *buf) {
-    return str_contains(buf, "Definition ") || str_contains(buf, "Require ") ||
-           str_contains(buf, "From ") || str_contains(buf, "Notation ") ||
-           str_contains(buf, "Module ") || str_contains(buf, "Section ") ||
-           str_contains(buf, "Ltac ") || str_contains(buf, "Class ") ||
-           str_contains(buf, "Instance ") || str_contains(buf, "Record ") ||
-           str_contains(buf, "Structure ") || str_contains(buf, "Variant ") ||
-           str_contains(buf, "Parameter ") || str_contains(buf, "Axiom ") ||
-           str_contains(buf, "Canonical ") || str_contains(buf, "Coercion ");
+/* Cheap Verilog structural veto: a line-anchored lowercase `module`/`endmodule`
+ * (Rocq's are capitalized `Module`/`End`) or a backtick compiler directive
+ * (`timescale/`include/`define/...), none of which exist in Rocq syntax. The scan
+ * skips Rocq `(* … *)` comments (with nesting) so Rocq prose — which freely says
+ * "module" because Rocq HAS a module system (e.g. CompCert's "the CSE module") —
+ * cannot trip it; this mirrors what the parser's lexer does. Verilog's own
+ * module/endmodule live outside comments, and its `(* attr *)` attributes are
+ * short and never contain these tokens, so skipping `(* … *)` is safe both ways.
+ * We deliberately do NOT anchor common words like always/assign/wire/reg/input —
+ * those also appear line-initial in Rocq prose. A miss here is harmless (the file
+ * falls through to the Rocq trial-parse, then the Verilog default); only a false
+ * positive could mishandle Rocq, which comment-skipping removes. */
+static bool has_verilog_anchored(const char *buf) {
+    static const char *const directives[] = {
+        "`timescale", "`include",    "`define",          "`ifdef", "`ifndef",
+        "`undef",     "`celldefine", "`resetall",        "`default_nettype", NULL};
+    int depth = 0; /* (* … *) comment nesting */
+    bool at_line_start = true;
+    for (const char *p = buf; *p; p++) {
+        if (depth > 0) { /* inside a Rocq comment — ignore everything but nesting */
+            if (p[0] == '(' && p[1] == '*') {
+                depth++;
+                p++;
+            } else if (p[0] == '*' && p[1] == ')') {
+                depth--;
+                p++;
+            } else if (*p == '\n') {
+                at_line_start = true;
+            }
+            continue;
+        }
+        if (p[0] == '(' && p[1] == '*') {
+            depth++;
+            p++;
+            at_line_start = false;
+            continue;
+        }
+        if (*p == '\n') {
+            at_line_start = true;
+            continue;
+        }
+        if (!at_line_start) {
+            continue;
+        }
+        if (*p == ' ' || *p == '\t') {
+            continue; /* leading indent — still at the logical line start */
+        }
+        at_line_start = false; /* first real token of this line, outside any comment */
+        if (*p == '`') {
+            for (int i = 0; directives[i]; i++) {
+                if (line_starts_with_token(p, directives[i], strlen(directives[i]))) {
+                    return true;
+                }
+            }
+        } else if (line_starts_with_token(p, "module", SLEN("module")) ||
+                   line_starts_with_token(p, "endmodule", SLEN("endmodule"))) {
+            return true;
+        }
+    }
+    return false;
 }
 
-static bool has_verilog_markers(const char *buf) {
-    return str_contains(buf, "module ") || str_contains(buf, "endmodule") ||
-           str_contains(buf, "always") || str_contains(buf, "reg ") ||
-           str_contains(buf, "wire ") || str_contains(buf, "assign ") ||
-           str_contains(buf, "posedge") || str_contains(buf, "`timescale") ||
-           str_contains(buf, "`include");
-}
+/* Bytes of a .v file we sniff to disambiguate. Larger than the usual 4K because
+ * Rocq files routinely open with multi-kilobyte license/doc comment headers
+ * (CompCert, math-comp, corn, …) before the first declaration; 4K can fall
+ * entirely inside the header and miss the code. Still a fixed bound. */
+enum { ROCQ_V_SNIFF_BYTES = 32 * 1024 };
 
 CBMLanguage cbm_disambiguate_v(const char *path) {
     if (!path) {
@@ -1070,16 +1118,23 @@ CBMLanguage cbm_disambiguate_v(const char *path) {
         return CBM_LANG_VERILOG;
     }
 
-    char buf[CBM_SZ_4K + SKIP_ONE];
-    size_t n = fread(buf, SKIP_ONE, CBM_SZ_4K, f);
+    char buf[ROCQ_V_SNIFF_BYTES + SKIP_ONE];
+    size_t n = fread(buf, SKIP_ONE, ROCQ_V_SNIFF_BYTES, f);
     buf[n] = '\0';
     (void)fclose(f);
 
-    if (has_rocq_strong_markers(buf)) {
+    /* 1. Cheap line-anchored Verilog veto — catches ~all real Verilog up front. */
+    if (has_verilog_anchored(buf)) {
+        return CBM_LANG_VERILOG;
+    }
+    /* 2. Bounded trial-parse: run the real Vernacular parser over this prefix and
+     *    accept Rocq only if it recognizes at least one declaration. Reusing the
+     *    parser keeps detection in lockstep with the grammar (no keyword list to
+     *    drift) and is lenient at the boundary — a term truncated by the sniff
+     *    window still counts, because the decl node is emitted at the command head. */
+    if (cbm_rocq_count_decls(buf, (int)n) >= 1) {
         return CBM_LANG_ROCQ;
     }
-    if (has_rocq_soft_markers(buf) && !has_verilog_markers(buf)) {
-        return CBM_LANG_ROCQ;
-    }
+    /* 3. Default: ties / no evidence go to Verilog — never break Verilog. */
     return CBM_LANG_VERILOG;
 }

@@ -609,6 +609,71 @@ TEST(lang_m_default_on_read_fail) {
     PASS();
 }
 
+/* ── .v disambiguation (Verilog vs Rocq) ───────────────────────── */
+
+static CBMLanguage disambiguate_v_str(const char *name, const char *body) {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s", cbm_tmpdir(), name);
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        return CBM_LANG_COUNT;
+    }
+    fputs(body, f);
+    fclose(f);
+    CBMLanguage lang = cbm_disambiguate_v(path);
+    remove(path);
+    return lang;
+}
+
+TEST(lang_v_verilog) {
+    ASSERT_EQ(disambiguate_v_str("tl_v_veri.v",
+                                 "`timescale 1ns/1ps\nmodule m(input a, output b);\n"
+                                 "  assign b = a;\nendmodule\n"),
+              CBM_LANG_VERILOG);
+    PASS();
+}
+
+TEST(lang_v_rocq) {
+    ASSERT_EQ(disambiguate_v_str("tl_v_rocq.v", "Definition x := 0.\nTheorem t : True.\nProof. exact I. Qed.\n"),
+              CBM_LANG_ROCQ);
+    PASS();
+}
+
+/* Regression: Rocq HAS a module system, so prose says "module" — a lowercase
+ * `module` inside a `(* … *)` comment must NOT trip the Verilog veto. (CompCert's
+ * CSE.v: "  module [CSEdomain]." inside a doc comment.) */
+TEST(lang_v_rocq_module_word_in_comment) {
+    ASSERT_EQ(disambiguate_v_str("tl_v_modcomment.v",
+                                 "(* This file implements the CSE optimization as a\n"
+                                 "   module [CSEdomain]. See the paper for details. *)\n"
+                                 "Require Import Coq.Lists.List.\n"
+                                 "Definition cse (x : nat) := x.\n"),
+              CBM_LANG_ROCQ);
+    PASS();
+}
+
+/* Regression: Rocq files routinely open with multi-kilobyte license/doc headers
+ * (CompCert/math-comp/corn). The first declaration can sit well past 4 KB; the
+ * sniff window must reach it. */
+TEST(lang_v_rocq_large_header) {
+    char body[20000];
+    int n = snprintf(body, sizeof(body), "(*\n");
+    for (int i = 0; i < 400 && n < (int)sizeof(body) - 200; i++) {
+        n += snprintf(body + n, sizeof(body) - (size_t)n,
+                      " * Copyright line %d — distributed under the terms of the license.\n", i);
+    }
+    n += snprintf(body + n, sizeof(body) - (size_t)n, " *)\nDefinition past_header := 42.\n");
+    ASSERT(n > 6000); /* header alone exceeds the old 4K window */
+    ASSERT_EQ(disambiguate_v_str("tl_v_bighdr.v", body), CBM_LANG_ROCQ);
+    PASS();
+}
+
+TEST(lang_v_default_on_read_fail) {
+    /* Non-existent file defaults to Verilog (never break Verilog). */
+    ASSERT_EQ(cbm_disambiguate_v("/tmp/nonexistent_file_98765.v"), CBM_LANG_VERILOG);
+    PASS();
+}
+
 /* --- New languages (auto-generated) --- */
 TEST(lang_ext_solidity) {
     ASSERT_EQ(cbm_language_for_extension(".sol"), CBM_LANG_SOLIDITY);
@@ -1204,6 +1269,11 @@ SUITE(language) {
     RUN_TEST(lang_m_magma);
     RUN_TEST(lang_m_matlab);
     RUN_TEST(lang_m_default_on_read_fail);
+    RUN_TEST(lang_v_verilog);
+    RUN_TEST(lang_v_rocq);
+    RUN_TEST(lang_v_rocq_module_word_in_comment);
+    RUN_TEST(lang_v_rocq_large_header);
+    RUN_TEST(lang_v_default_on_read_fail);
 
     /* Go test ports */
     /* New languages */

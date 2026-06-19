@@ -346,12 +346,15 @@ static void handle_assumption(RW *rw, TSNode node, const char *scope) {
 static void handle_notation_or_tactic(RW *rw, TSNode node, const char *scope, bool is_tactic_sym) {
     TSNode pat = ts_node_child_by_field_name(node, "pattern", 7);
     if (ts_node_is_null(pat)) {
-        // Ltac form: a plain named tactic (label "Function"). The node carries a
-        // name leaf (nm non-null); node_text can still fail under OOM.
+        // Named, no quoted pattern: an Ltac/Tactic Notation (callable "Function")
+        // or a `Notation ident := …` abbreviation (a named "Variable" alias).
+        // The node carries a name leaf (nm non-null); node_text can still fail
+        // under OOM.
         TSNode nm = field_name(node);
         char *name = node_text(rw, nm);
         if (name) {
-            emit_def(rw, name, build_qn(rw, scope, name), "Function", line_of(nm), line_of(nm));
+            const char *nlabel = is_tactic_sym ? "Function" : "Variable";
+            emit_def(rw, name, build_qn(rw, scope, name), nlabel, line_of(nm), line_of(nm));
         }
         rw->last_def_idx = -1;
         return;

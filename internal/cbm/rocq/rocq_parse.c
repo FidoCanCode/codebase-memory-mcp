@@ -317,6 +317,15 @@ static void h_notation(RP *rp, RocqSymbol node_sym) {
             tb_leaf_tok(rp, RSYM_STRING, u); // pattern @ child 0
             continue;
         }
+        if (!opened && u.kind == ROCQ_TOK_IDENT) {
+            // Abbreviation form `Notation ident := term` (no quoted pattern). The
+            // name takes child 0 under the "name" field (RPROD_NAME), so the walk
+            // treats it as a named alias rather than a quoted operator pattern.
+            rocq_tb_open(rp->tb, node_sym, RPROD_NAME);
+            opened = true;
+            tb_leaf_tok(rp, ident_sym_of(u), u); // name @ child 0
+            continue;
+        }
         if (tok_is_assign(u)) {
             seen_assign = true;
             continue;

@@ -11,6 +11,7 @@
 #include "arena.h"
 #include "rocq/rocq_project.h"
 #include "rocq/rocq_notation.h"
+#include "rocq/rocq_detect.h"
 
 #include <string.h>
 
@@ -70,6 +71,11 @@ static int has_import(CBMFileResult *r, const char *path_substr) {
             return 1;
     }
     return 0;
+}
+
+/* Declarations the .v disambiguator recognizes in a prefix (drives Rocq-vs-Verilog). */
+static int ndecls(const char *s) {
+    return cbm_rocq_count_decls(s, (int)strlen(s));
 }
 
 /* ── Definitions ───────────────────────────────────────────────── */
@@ -209,6 +215,35 @@ TEST(rocq_ltac_parameter_axiom_notation) {
     ASSERT(has_def(r, "Function", "myauto"));
     ASSERT(has_def_any(r, "x +++ y")); /* notation node named after its string */
     cbm_free_result(r);
+    PASS();
+}
+
+TEST(rocq_notation_abbreviation_emits_alias) {
+    /* The abbreviation form `Notation id := term` (no quoted pattern) is a named
+     * alias, recorded as a "Variable" — distinct from the string/operator form.
+     * Buchberger's h*.v files are made entirely of these. */
+    CBMFileResult *r = rocq("Notation foo := (plus 1 1) (only parsing).\n", "demo.v");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Variable", "foo"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* ── .v disambiguation (Rocq vs Verilog) ───────────────────────── */
+
+TEST(rocq_disambiguation_counts_declarations) {
+    /* cbm_disambiguate_v() accepts Rocq only when the real parser recognizes a
+     * declaration in the prefix. Exercise that counter directly. */
+    ASSERT(ndecls("Definition x := 0.\n") >= 1);
+    ASSERT(ndecls("Theorem t : True. Proof. exact I. Qed.\n") >= 1);
+    ASSERT(ndecls("Notation foo := bar.\n") >= 1);             /* abbreviation form */
+    ASSERT(ndecls("Require Import Coq.Init.Nat.\n") >= 1);
+    ASSERT(ndecls("Let a := eqA_ref _ _ cs.\n") >= 1);         /* bare Let binding */
+    /* Real Verilog: lowercase keywords are never Rocq commands → no declarations. */
+    ASSERT(ndecls("module m(input a, output b); assign b = a; endmodule\n") == 0);
+    /* Comment-only stub: nothing to extract in either language. */
+    ASSERT(ndecls("(* just a copyright header *)\n") == 0);
     PASS();
 }
 
@@ -524,4 +559,6 @@ SUITE(rocq) {
     RUN_TEST(rocq_instance_class_past_binders);
     RUN_TEST(rocq_tactic_notation_is_function);
     RUN_TEST(rocq_coercion_emits_impl_trait);
+    RUN_TEST(rocq_notation_abbreviation_emits_alias);
+    RUN_TEST(rocq_disambiguation_counts_declarations);
 }
