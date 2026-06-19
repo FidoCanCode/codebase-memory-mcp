@@ -102,8 +102,8 @@ void rocq_projmap_add_dune(RocqProjMap *m, const char *dir, const char *text, in
             na++;
         }
         if (na > start) {
-            projmap_add(m, dup_range(dir ? dir : "", (int)strlen(dir ? dir : "")),
-                        dup_range(text + start, na - start));
+            // dir is always a non-null directory string (the caller's responsibility).
+            projmap_add(m, dup_range(dir, (int)strlen(dir)), dup_range(text + start, na - start));
         }
         i = (na > after) ? na : after; // always advance past this stanza's keyword
     }

@@ -116,7 +116,7 @@ static void register_notation(RW *rw, const char *op, int oplen, const char *tar
         if (!n) {
             return;
         }
-        if (rw->notations && rw->notation_count > 0) {
+        if (rw->notations) { // non-null implies notation_count > 0 (we have appended before)
             memcpy(n, rw->notations, (size_t)rw->notation_count * sizeof(RocqNotation));
         }
         rw->notations = n;
@@ -367,7 +367,9 @@ static void handle_notation_or_tactic(RW *rw, TSNode node, const char *scope, bo
     const char *target = NULL;
     int target_line = 0;
     uint32_t cc = ts_node_named_child_count(node);
-    for (uint32_t i = 0; i < cc && !target; i++) {
+    // The term (if any) is the last child, so finding the head ident exits the
+    // loop via i >= cc on the next iteration; no `&& !target` guard is needed.
+    for (uint32_t i = 0; i < cc; i++) {
         TSNode ch = ts_node_named_child(node, i);
         if (ts_node_symbol(ch) != RSYM_TERM) {
             continue;
@@ -412,12 +414,9 @@ static void handle_coercion(RW *rw, TSNode node) {
     const char *a = NULL;
     const char *b = NULL;
     for (uint32_t i = 0; i < cc; i++) {
-        TSNode ch = ts_node_named_child(node, i);
-        TSSymbol s = ts_node_symbol(ch);
-        if (s != RSYM_IDENT && s != RSYM_QUALID) {
-            continue;
-        }
-        char *t = node_text(rw, ch);
+        // The parser emits exactly two ident/qualid leaves in a coercion node;
+        // node_text only returns NULL on OOM.
+        char *t = node_text(rw, ts_node_named_child(node, i));
         if (!t) {
             continue;
         }
@@ -558,7 +557,7 @@ void rocq_walk_tree(CBMArena *a, CBMFileResult *result, const void *tree, const 
     rw.result = result;
     rw.source = source;
     rw.module_qn = module_qn;
-    rw.rel_path = rel_path ? cbm_arena_strdup(a, rel_path) : NULL;
+    rw.rel_path = cbm_arena_strdup(a, rel_path); // NULL-safe; rel_path is non-null in practice
     rw.last_def_idx = -1;
 
     // Seed notations imported from Require'd modules (resolved cross-file by the

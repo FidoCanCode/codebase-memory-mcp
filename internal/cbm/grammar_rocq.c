@@ -258,9 +258,8 @@ void rocq_tb_close(RocqTreeBuilder *b) {
     RocqFrame f = b->frames[--b->nframes];
     if (f.children.size == 0) {
         // Drop empty nodes (e.g. a `term`/`proof` that captured no tokens) rather
-        // than emit a zero-width named node. Field maps only target the leaf-bearing
-        // command nodes, which always carry their name child, so dropping is safe.
-        array_delete(&f.children);
+        // than emit a zero-width named node. An empty frame never grew its children
+        // array (size 0 ⇒ no array_push ⇒ contents NULL), so there is nothing to free.
         return;
     }
     MutableSubtree node = ts_subtree_new_node((TSSymbol)f.sym, &f.children, f.prod, &rocq_language);

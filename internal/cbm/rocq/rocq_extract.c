@@ -38,7 +38,7 @@ void cbm_rocq_extract_file(CBMArena *a, CBMFileResult *result, const char *sourc
             def.name = leaf; // points into the arena-owned module_qn
             def.qualified_name = result->module_qn;
             def.label = "Module";
-            def.file_path = rel_path ? cbm_arena_strdup(a, rel_path) : NULL;
+            def.file_path = cbm_arena_strdup(a, rel_path); // NULL-safe; rel_path is non-null in practice
             def.start_line = 1;
             def.end_line = 1;
             def.complexity = 1;

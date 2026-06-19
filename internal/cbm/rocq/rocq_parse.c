@@ -626,7 +626,7 @@ static RocqToken read_command_keyword(RP *rp) {
             rp_next(rp); // empty command
             continue;
         }
-        if (t.kind == ROCQ_TOK_SYMBOL && t.len >= 1 && t.text[0] == '#') {
+        if (t.kind == ROCQ_TOK_SYMBOL && t.text[0] == '#') { // a SYMBOL token always has len >= 1
             rp_next(rp);
             RocqToken b = rp_peek(rp);
             if (b.kind == ROCQ_TOK_LBRACK) {

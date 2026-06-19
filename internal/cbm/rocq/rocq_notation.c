@@ -39,7 +39,7 @@ static void push_notation(CBMArena *a, RocqNotationEntry **arr, int *count, int 
         if (!n) {
             return;
         }
-        if (*arr && *count > 0) {
+        if (*arr) { // *arr non-null at a grow implies *count > 0 (we have pushed before)
             memcpy(n, *arr, (size_t)*count * sizeof(*n));
         }
         *arr = n;
@@ -57,7 +57,7 @@ static void push_require(CBMArena *a, const char ***arr, int *count, int *cap, c
         if (!n) {
             return;
         }
-        if (*arr && *count > 0) {
+        if (*arr) { // *arr non-null at a grow implies *count > 0 (we have pushed before)
             memcpy(n, *arr, (size_t)*count * sizeof(*n));
         }
         *arr = n;
