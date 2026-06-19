@@ -1,60 +1,22 @@
 // SPDX-License-Identifier: MIT
 //
-// rocq_parse.c — see rocq_parse.h. Original hand-written Vernacular parser.
+// rocq_parse.c — see rocq_parse.h. Original hand-written Vernacular parser that
+// builds a tree-sitter TSTree. Purely syntactic: it opens/closes nodes and emits
+// leaves; it computes no qualified names and resolves no references.
 #include "rocq/rocq_parse.h"
+#include "rocq/rocq_cst.h"
 #include "rocq/rocq_lex.h"
-#include "rocq/rocq_notation.h"
+#include "rocq/rocq_tree.h"
 
-#include <stdio.h>
+#include <stdbool.h>
 #include <string.h>
 
-enum {
-    RP_MAX_SCOPE = 128,
-    RP_QN_BUF = 1024,
-};
-
-typedef enum {
-    RP_SCOPE_MODULE,
-    RP_SCOPE_MODTYPE,
-    RP_SCOPE_SECTION,
-} RpScopeKind;
-
 typedef struct {
-    RpScopeKind kind;
-    const char *name; // arena-owned
-} RpScope;
-
-// A user-defined notation's dynamic binding: the literal operator token of the
-// notation pattern (e.g. "+") mapped to the head identifier its RHS expands to
-// (e.g. "Nat.add"). The table is the parser's extensibility point — populated
-// when a Notation/Infix command is parsed, and consulted when resolving later
-// uses, so a notation only affects text that follows its declaration.
-typedef struct {
-    const char *op;     // arena-owned literal operator token
-    const char *target; // arena-owned head identifier of the expansion
-} RocqNotation;
-
-typedef struct {
-    CBMArena *a;
-    CBMFileResult *result;
-    const char *module_qn;
-    const char *rel_path; // arena-owned copy
-
     RocqLexer lx;
     RocqToken lookahead;
     bool have_lookahead;
-
-    RpScope scopes[RP_MAX_SCOPE];
-    int scope_count;
-
-    // Proof state. last_def_idx tracks the most recent proof-bearing definition
-    // so a following `Proof.` attaches its body's references to it.
-    int last_def_idx;
-    const char *proof_owner; // arena-owned QN, non-NULL while harvesting a proof
-
-    RocqNotation *notations; // dynamic notation table (arena-grown), file-order
-    int notation_count;
-    int notation_cap;
+    RocqTreeBuilder *tb;
+    bool proof_open; // a `Proof. … Qed.` block is currently capturing tactic tokens
 } RP;
 
 // ---- token stream with one-token lookahead --------------------------------
@@ -92,217 +54,65 @@ static bool tok_is_semi(RocqToken t) {
     return t.kind == ROCQ_TOK_SYMBOL && t.len == 1 && t.text[0] == ';';
 }
 
-// ---- name / QN helpers -----------------------------------------------------
-
-static void leaf_of(const char *text, int len, const char **lp, int *ll) {
-    for (int k = len - 1; k >= 0; k--) {
-        if (text[k] == '.') {
-            *lp = text + k + 1;
-            *ll = len - (k + 1);
-            return;
-        }
-    }
-    *lp = text;
-    *ll = len;
+static bool tok_is_colon(RocqToken t) {
+    return t.kind == ROCQ_TOK_SYMBOL && t.len == 1 && t.text[0] == ':';
 }
 
-// Build "<module_qn>[.<scope...>].<name>" in the arena.
-static const char *build_qn(RP *rp, const char *name, int namelen) {
-    char buf[RP_QN_BUF];
-    int n = snprintf(buf, sizeof(buf), "%s", rp->module_qn);
-    for (int i = 0; i < rp->scope_count && n < (int)sizeof(buf); i++) {
-        n += snprintf(buf + n, sizeof(buf) - (size_t)n, ".%s", rp->scopes[i].name);
-    }
-    if (n < (int)sizeof(buf)) {
-        snprintf(buf + n, sizeof(buf) - (size_t)n, ".%.*s", namelen, name);
-    }
-    return cbm_arena_strdup(rp->a, buf);
+// ---- tree-builder shims ----------------------------------------------------
+
+// Emit a leaf for token `t` carrying symbol `sym`.
+static void tb_leaf_tok(RP *rp, RocqSymbol sym, RocqToken t) {
+    rocq_tb_leaf(rp->tb, sym, (uint32_t)t.start_byte, (uint32_t)(t.start_byte + t.len));
 }
 
-static const char *build_child_qn(RP *rp, const char *parent_qn, const char *name, int namelen) {
-    char buf[RP_QN_BUF];
-    snprintf(buf, sizeof(buf), "%s.%.*s", parent_qn, namelen, name);
-    return cbm_arena_strdup(rp->a, buf);
-}
-
-// Emit a top-level (scope-qualified) definition; returns its index in defs.
-static int emit_def(RP *rp, const char *label, RocqToken name, int end_line) {
-    CBMDefinition def = {0};
-    def.name = cbm_arena_strndup(rp->a, name.text, (size_t)name.len);
-    def.qualified_name = build_qn(rp, name.text, name.len);
-    def.label = label;
-    def.file_path = rp->rel_path;
-    def.start_line = (uint32_t)name.line;
-    def.end_line = (uint32_t)(end_line > 0 ? end_line : name.line);
-    def.complexity = 1;
-    cbm_defs_push(&rp->result->defs, rp->a, def);
-    return rp->result->defs.count - 1;
-}
-
-// Emit a child (constructor/field) under a parent type QN.
-static void emit_child(RP *rp, const char *parent_qn, RocqToken name) {
-    CBMDefinition def = {0};
-    def.name = cbm_arena_strndup(rp->a, name.text, (size_t)name.len);
-    def.qualified_name = build_child_qn(rp, parent_qn, name.text, name.len);
-    def.label = "Method";
-    def.file_path = rp->rel_path;
-    def.start_line = (uint32_t)name.line;
-    def.end_line = (uint32_t)name.line;
-    def.parent_class = parent_qn;
-    def.complexity = 1;
-    cbm_defs_push(&rp->result->defs, rp->a, def);
-}
-
-static void emit_call(RP *rp, const char *owner_qn, RocqToken callee) {
-    CBMCall c = {0};
-    c.callee_name = cbm_arena_strndup(rp->a, callee.text, (size_t)callee.len);
-    c.enclosing_func_qn = owner_qn;
-    c.start_line = callee.line;
-    cbm_calls_push(&rp->result->calls, rp->a, c);
-}
-
-static void emit_import_logical(RP *rp, const char *text, int len) {
-    if (len <= 0) {
-        return;
-    }
-    CBMImport imp = {0};
-    imp.module_path = cbm_arena_strndup(rp->a, text, (size_t)len);
-    const char *lp;
-    int ll;
-    leaf_of(text, len, &lp, &ll);
-    imp.local_name = cbm_arena_strndup(rp->a, lp, (size_t)ll);
-    cbm_imports_push(&rp->result->imports, rp->a, imp);
-}
-
-// ---- callee filter ---------------------------------------------------------
-
-// Gallina / Ltac keywords that are never useful as proof-dependency targets.
-// Filtering them only saves resolution work — unknown names that survive are
-// simply discarded by the registry resolver, so the set need not be exhaustive.
-static bool is_filtered_callee(const char *t, int len) {
-    static const char *kw[] = {
-        "forall", "fun",    "fix",     "cofix",  "match",  "with",     "end",
-        "let",    "in",     "if",      "then",   "else",   "return",   "as",
-        "at",     "by",     "using",   "Type",   "Prop",   "Set",      "of",
-        "intro",  "intros", "apply",   "exact",  "refine", "rewrite",  "destruct",
-        "induction", "simpl", "cbn",   "unfold", "fold",   "reflexivity", "symmetry",
-        "transitivity", "assumption", "auto",  "eauto",  "trivial", "lia",   "nia",
-        "omega",  "ring",   "field",   "congruence", "discriminate", "injection",
-        "inversion", "subst", "clear", "generalize", "revert", "specialize", "pose",
-        "set",    "remember", "assert", "cut",  "split",  "left",    "right",
-        "exists", "constructor", "econstructor", "case", "elim",  "change",
-        "contradiction", "exfalso", "now", "try", "repeat", "do",   "first",
-        "solve",  "idtac",  "fail",    "unshelve", "eapply", "rename", "move",
-        NULL,
-    };
-    for (int i = 0; kw[i]; i++) {
-        size_t n = strlen(kw[i]);
-        if ((size_t)len == n && memcmp(t, kw[i], n) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// ---- dynamic notation table -----------------------------------------------
-
-// Emit a call to a resolved target name (arena-owned), not a source token.
-static void emit_call_name(RP *rp, const char *owner_qn, const char *name, int line) {
-    if (!owner_qn || !name) {
-        return;
-    }
-    CBMCall c = {0};
-    c.callee_name = name;
-    c.enclosing_func_qn = owner_qn;
-    c.start_line = line;
-    cbm_calls_push(&rp->result->calls, rp->a, c);
-}
-
-// Structural punctuation that is too common to safely treat as a notation
-// operator (a notation reusing ';'/','/etc. would otherwise match everywhere).
-static bool notation_op_too_common(const char *op, int len) {
-    if (len != 1) {
-        return false;
-    }
-    switch (op[0]) {
-    case ';':
-    case ',':
-    case ':':
-    case '|':
-        return true;
+// The leaf symbol for an arbitrary token, or RSYM_END to mean "structural
+// punctuation — not a leaf" (parens/braces/dots/EOF are tree padding).
+static RocqSymbol leaf_sym_of(RocqToken t) {
+    switch (t.kind) {
+    case ROCQ_TOK_IDENT:
+        return memchr(t.text, '.', (size_t)t.len) ? RSYM_QUALID : RSYM_IDENT;
+    case ROCQ_TOK_NUMBER:
+        return RSYM_NUMBER;
+    case ROCQ_TOK_STRING:
+        return RSYM_STRING;
+    case ROCQ_TOK_SYMBOL:
+        return RSYM_OPERATOR;
     default:
-        return false;
+        return RSYM_END;
     }
 }
 
-static void register_notation(RP *rp, const char *op, int oplen, const char *target) {
-    if (oplen <= 0 || !target || notation_op_too_common(op, oplen)) {
+// An identifier leaf symbol (qualid when dotted).
+static RocqSymbol ident_sym_of(RocqToken t) {
+    return memchr(t.text, '.', (size_t)t.len) ? RSYM_QUALID : RSYM_IDENT;
+}
+
+// Push a reference token into a lazily-opened `term` node (so empty bodies emit
+// no node). Punctuation is dropped (recorded only as padding).
+static void body_token(RP *rp, RocqToken t, bool *term_open) {
+    RocqSymbol s = leaf_sym_of(t);
+    if (s == RSYM_END) {
         return;
     }
-    if (rp->notation_count >= rp->notation_cap) {
-        int ncap = rp->notation_cap ? rp->notation_cap * 2 : 16;
-        RocqNotation *n = (RocqNotation *)cbm_arena_alloc(rp->a, (size_t)ncap * sizeof(RocqNotation));
-        if (!n) {
-            return;
-        }
-        if (rp->notations && rp->notation_count > 0) {
-            memcpy(n, rp->notations, (size_t)rp->notation_count * sizeof(RocqNotation));
-        }
-        rp->notations = n;
-        rp->notation_cap = ncap;
+    if (!*term_open) {
+        rocq_tb_open(rp->tb, RSYM_TERM, RPROD_NONE);
+        *term_open = true;
     }
-    rp->notations[rp->notation_count].op = cbm_arena_strndup(rp->a, op, (size_t)oplen);
-    rp->notations[rp->notation_count].target = target;
-    rp->notation_count++;
+    tb_leaf_tok(rp, s, t);
 }
 
-// Most-recently-registered notation for an operator token wins (later
-// declarations shadow earlier ones), matching Rocq's file-order semantics.
-static const char *lookup_notation(RP *rp, const char *op, int oplen) {
-    for (int i = rp->notation_count - 1; i >= 0; i--) {
-        const char *o = rp->notations[i].op;
-        size_t n = strlen(o);
-        if ((size_t)oplen == n && memcmp(o, op, n) == 0) {
-            return rp->notations[i].target;
-        }
-    }
-    return NULL;
-}
-
-// Harvest one body/proof token as a dependency of owner_qn: an identifier
-// resolves by name (the registry resolves it later); a notation operator
-// resolves through the dynamic table to the definition it expands to.
-static void harvest_token(RP *rp, const char *owner_qn, RocqToken t) {
-    if (!owner_qn) {
-        return;
-    }
-    if (t.kind == ROCQ_TOK_IDENT) {
-        if (!is_filtered_callee(t.text, t.len)) {
-            emit_call(rp, owner_qn, t);
-        }
-    } else if (t.kind == ROCQ_TOK_SYMBOL) {
-        const char *tgt = lookup_notation(rp, t.text, t.len);
-        if (tgt) {
-            emit_call_name(rp, owner_qn, tgt, t.line);
-        }
+static void close_term(RP *rp, bool *term_open) {
+    if (*term_open) {
+        rocq_tb_close(rp->tb);
+        *term_open = false;
     }
 }
 
-// ---- scope management ------------------------------------------------------
-
-static void scope_push(RP *rp, RpScopeKind kind, RocqToken name) {
-    if (rp->scope_count >= RP_MAX_SCOPE) {
-        return;
-    }
-    rp->scopes[rp->scope_count].kind = kind;
-    rp->scopes[rp->scope_count].name = cbm_arena_strndup(rp->a, name.text, (size_t)name.len);
-    rp->scope_count++;
-}
-
-static void scope_pop(RP *rp) {
-    if (rp->scope_count > 0) {
-        rp->scope_count--;
-    }
+// Emit a leaf-only child node (constructor/field/assumption): [ident(name)].
+static void emit_named_leaf_node(RP *rp, RocqSymbol node_sym, RocqToken name) {
+    rocq_tb_open(rp->tb, node_sym, RPROD_NAME);
+    tb_leaf_tok(rp, RSYM_IDENT, name);
+    rocq_tb_close(rp->tb);
 }
 
 // ---- per-command consumption helpers --------------------------------------
@@ -316,26 +126,12 @@ static void skip_to_dot(RP *rp) {
     }
 }
 
-// Harvest every non-filtered identifier in the rest of the command as a call
-// from owner_qn. Returns the line of the terminating dot (or last token).
-static int harvest_to_dot(RP *rp, const char *owner_qn) {
-    int last_line = 0;
-    for (;;) {
-        RocqToken t = rp_next(rp);
-        if (t.kind == ROCQ_TOK_DOT || t.kind == ROCQ_TOK_EOF) {
-            return t.line ? t.line : last_line;
-        }
-        last_line = t.line;
-        harvest_token(rp, owner_qn, t);
-    }
-}
-
 // ---- command handlers ------------------------------------------------------
 
-// Definition / Theorem / Lemma / Fixpoint / Instance / ...  (label "Function").
-// Reads the name, emits the def, then harvests body references as calls. Honors
-// `with` for mutually-recursive groups.
-static void h_define(RP *rp, const char *label) {
+// Definition / Theorem / Lemma / Fixpoint / Instance-less defs. Emits a command
+// node named after the head identifier, then a `term` holding the body's
+// reference tokens. `with` starts a sibling node in a mutually-recursive group.
+static void h_define(RP *rp, RocqSymbol cmd_sym) {
     RocqToken t = rp_peek(rp);
     while (t.kind != ROCQ_TOK_IDENT && t.kind != ROCQ_TOK_DOT && t.kind != ROCQ_TOK_EOF) {
         rp_next(rp);
@@ -343,52 +139,55 @@ static void h_define(RP *rp, const char *label) {
     }
     if (t.kind != ROCQ_TOK_IDENT) {
         skip_to_dot(rp);
-        rp->last_def_idx = -1;
         return;
     }
+    rocq_tb_open(rp->tb, cmd_sym, RPROD_NAME);
     RocqToken name = rp_next(rp);
-    int idx = emit_def(rp, label, name, 0);
-    rp->last_def_idx = idx;
-    const char *owner = rp->result->defs.items[idx].qualified_name;
+    tb_leaf_tok(rp, RSYM_IDENT, name);
 
+    bool term_open = false;
     for (;;) {
         RocqToken u = rp_next(rp);
         if (u.kind == ROCQ_TOK_DOT || u.kind == ROCQ_TOK_EOF) {
+            close_term(rp, &term_open);
+            rocq_tb_close(rp->tb);
             return;
         }
         if (u.kind == ROCQ_TOK_IDENT && tok_eq(u, "with")) {
             RocqToken n2 = rp_peek(rp);
             if (n2.kind == ROCQ_TOK_IDENT) {
+                close_term(rp, &term_open);
+                rocq_tb_close(rp->tb); // close current clause
                 rp_next(rp);
-                int j = emit_def(rp, label, n2, 0);
-                owner = rp->result->defs.items[j].qualified_name;
-                rp->last_def_idx = j;
+                rocq_tb_open(rp->tb, cmd_sym, RPROD_NAME);
+                tb_leaf_tok(rp, RSYM_IDENT, n2);
             }
             continue;
         }
-        harvest_token(rp, owner, u);
+        body_token(rp, u, &term_open);
     }
 }
 
 typedef enum { RP_TYPE_INDUCTIVE, RP_TYPE_RECORD } RpTypeMode;
 
-// Inductive / Variant / Record / Class (label "Type" with "Method" children).
-static void h_type(RP *rp, RpTypeMode mode, const char *type_label) {
+// Inductive / Variant / Record / Class: a type node whose children include the
+// name (field) and one constructor/field node per member.
+static void h_type(RP *rp, RpTypeMode mode, RocqSymbol type_sym) {
     RocqToken t = rp_peek(rp);
     if (t.kind != ROCQ_TOK_IDENT) {
         skip_to_dot(rp);
         return;
     }
+    rocq_tb_open(rp->tb, type_sym, RPROD_NAME);
     RocqToken name = rp_next(rp);
-    int idx = emit_def(rp, type_label, name, 0);
-    rp->last_def_idx = idx;
-    const char *parent = rp->result->defs.items[idx].qualified_name;
+    tb_leaf_tok(rp, RSYM_IDENT, name);
 
     bool child_next = false; // next ident is a constructor/field name
     int brace_depth = 0;
     for (;;) {
         RocqToken u = rp_next(rp);
         if (u.kind == ROCQ_TOK_DOT || u.kind == ROCQ_TOK_EOF) {
+            rocq_tb_close(rp->tb);
             return;
         }
         if (mode == RP_TYPE_RECORD) {
@@ -409,7 +208,7 @@ static void h_type(RP *rp, RpTypeMode mode, const char *type_label) {
                 continue;
             }
             if (child_next && u.kind == ROCQ_TOK_IDENT) {
-                emit_child(rp, parent, u);
+                emit_named_leaf_node(rp, RSYM_FIELD_DEF, u);
                 child_next = false;
             }
             continue;
@@ -422,38 +221,39 @@ static void h_type(RP *rp, RpTypeMode mode, const char *type_label) {
         if (u.kind == ROCQ_TOK_IDENT && tok_eq(u, "with")) {
             RocqToken n2 = rp_peek(rp);
             if (n2.kind == ROCQ_TOK_IDENT) {
+                rocq_tb_close(rp->tb); // close current type
                 rp_next(rp);
-                int j = emit_def(rp, type_label, n2, 0);
-                parent = rp->result->defs.items[j].qualified_name;
-                rp->last_def_idx = j;
+                rocq_tb_open(rp->tb, type_sym, RPROD_NAME);
+                tb_leaf_tok(rp, RSYM_IDENT, n2);
             }
             child_next = false;
             continue;
         }
         if (child_next && u.kind == ROCQ_TOK_IDENT) {
-            emit_child(rp, parent, u);
+            emit_named_leaf_node(rp, RSYM_CONSTRUCTOR, u);
             child_next = false;
         }
     }
 }
 
-// Module / Module Type / Section (label "Module"). Pushes a scope for body
-// modules; `:=` aliases declare no body and do not push.
-static void h_module(RP *rp, bool is_section) {
-    RpScopeKind kind = is_section ? RP_SCOPE_SECTION : RP_SCOPE_MODULE;
+// Module / Module Type / Section. The container node is left *open* so the body
+// commands nest beneath it; a matching `End` closes it. A `:=` alias module has
+// no body and is closed immediately.
+static void h_module(RP *rp, RocqSymbol container_sym, bool is_section) {
+    RocqSymbol sym = container_sym;
     RocqToken t = rp_peek(rp);
     if (!is_section && tok_eq(t, "Type")) {
         rp_next(rp);
-        kind = RP_SCOPE_MODTYPE;
+        sym = RSYM_MODULE_TYPE;
         t = rp_peek(rp);
     }
     if (t.kind != ROCQ_TOK_IDENT) {
         skip_to_dot(rp);
         return;
     }
+    rocq_tb_open(rp->tb, sym, RPROD_NAME);
     RocqToken name = rp_next(rp);
-    emit_def(rp, "Module", name, 0);
-    rp->last_def_idx = -1;
+    tb_leaf_tok(rp, RSYM_IDENT, name);
 
     bool has_assign = false;
     for (;;) {
@@ -465,13 +265,14 @@ static void h_module(RP *rp, bool is_section) {
             has_assign = true;
         }
     }
-    if (is_section || !has_assign) {
-        scope_push(rp, kind, name);
+    if (!is_section && has_assign) {
+        rocq_tb_close(rp->tb); // alias declares no body
     }
+    // Otherwise the node stays open; `End` (or rocq_tb_finish at EOF) closes it.
 }
 
-// Parameter / Axiom / Variable / Hypothesis ... (label "Variable").
-// Emits one Variable per name appearing before the first ':'.
+// Parameter / Axiom / Variable / Hypothesis …: one assumption node per name
+// appearing before the first ':'/binder.
 static void h_assume(RP *rp) {
     for (;;) {
         RocqToken u = rp_next(rp);
@@ -479,98 +280,173 @@ static void h_assume(RP *rp) {
             return;
         }
         if (u.kind == ROCQ_TOK_SYMBOL || u.kind == ROCQ_TOK_LPAREN || u.kind == ROCQ_TOK_LBRACE) {
-            // reached the type annotation / binder section — stop naming.
-            skip_to_dot(rp);
+            skip_to_dot(rp); // reached the type annotation / binder section
             return;
         }
         if (u.kind == ROCQ_TOK_IDENT) {
-            emit_def(rp, "Variable", u, 0);
+            emit_named_leaf_node(rp, RSYM_ASSUMPTION, u);
         }
     }
 }
 
-// Ltac / Ltac2 tactic definition (label "Function"); body left opaque.
+// Ltac / Ltac2 tactic definition; body left opaque.
 static void h_ltac(RP *rp) {
     RocqToken t = rp_peek(rp);
     if (t.kind == ROCQ_TOK_IDENT) {
         rp_next(rp);
-        emit_def(rp, "Function", t, 0);
+        emit_named_leaf_node(rp, RSYM_TACTIC, t);
     }
-    rp->last_def_idx = -1;
     skip_to_dot(rp);
 }
 
-// Notation / Infix (label "Variable", low priority). Names the node after the
-// notation string literal; bodies are opaque.
-static void h_notation(RP *rp, const char *node_label) {
-    // Pattern: Notation "<pattern>" := (<head> ...).  Capture the pattern string
-    // and the head identifier of the expansion, then register each literal
-    // operator in the pattern as a dynamic binding to that head.
-    RocqToken str = {0};
-    bool have_str = false;
+// Notation / Infix / Tactic Notation. The node's `pattern` field is the literal
+// pattern string; the `term` after `:=` holds the expansion tokens (the walk
+// reads the head identifier and registers the pattern's operators).
+static void h_notation(RP *rp, RocqSymbol node_sym) {
+    bool opened = false;
     bool seen_assign = false;
-    const char *target = NULL;
-    int target_line = 0;
+    bool term_open = false;
     for (;;) {
         RocqToken u = rp_next(rp);
         if (u.kind == ROCQ_TOK_DOT || u.kind == ROCQ_TOK_EOF) {
             break;
         }
-        if (!have_str && u.kind == ROCQ_TOK_STRING && u.len >= 2) {
-            str = u;
-            have_str = true;
+        if (!opened && u.kind == ROCQ_TOK_STRING && u.len >= 2) {
+            rocq_tb_open(rp->tb, node_sym, RPROD_NOTATION);
+            opened = true;
+            tb_leaf_tok(rp, RSYM_STRING, u); // pattern @ child 0
             continue;
         }
         if (tok_is_assign(u)) {
             seen_assign = true;
             continue;
         }
-        if (seen_assign && !target && u.kind == ROCQ_TOK_IDENT &&
-            !is_filtered_callee(u.text, u.len)) {
-            target = cbm_arena_strndup(rp->a, u.text, (size_t)u.len);
-            target_line = u.line;
+        if (opened && seen_assign) {
+            body_token(rp, u, &term_open);
         }
     }
-
-    int nidx = -1;
-    if (have_str) {
-        RocqToken inner = str;
-        inner.text = str.text + 1; // strip the surrounding quotes
-        inner.len = str.len - 2;
-        if (inner.len > 0) {
-            nidx = emit_def(rp, node_label, inner, 0);
-        }
-    }
-    rp->last_def_idx = -1;
-
-    if (have_str && target) {
-        // The notation node depends on the definition it expands to.
-        if (nidx >= 0) {
-            emit_call_name(rp, rp->result->defs.items[nidx].qualified_name, target, target_line);
-        }
-        // Register each literal operator token in the pattern. Re-lex the inner
-        // pattern: identifiers are notation parameters; SYMBOL runs are the
-        // literal operators that denote the expansion at use sites.
-        RocqLexer il;
-        rocq_lex_init(&il, str.text + 1, str.len - 2);
-        for (;;) {
-            RocqToken t = rocq_lex_next(&il);
-            if (t.kind == ROCQ_TOK_EOF) {
-                break;
-            }
-            if (t.kind == ROCQ_TOK_SYMBOL) {
-                register_notation(rp, t.text, t.len, target);
-            }
-        }
+    if (opened) {
+        close_term(rp, &term_open);
+        rocq_tb_close(rp->tb);
     }
 }
 
-// Require [Import|Export] A.B C ...  — emit one import per logical module name.
-static void h_require(RP *rp) {
+// Tactic Notation "<pat>" := (<tac> …). Modeled like a notation, but the node is
+// a tactic (so the walk labels it a Function).
+static void h_tactic_notation(RP *rp) {
+    RocqToken n = rp_peek(rp);
+    if (tok_eq(n, "Notation")) {
+        rp_next(rp);
+        h_notation(rp, RSYM_TACTIC);
+    } else {
+        skip_to_dot(rp);
+    }
+}
+
+// Coercion <name> : A >-> B. Emits a coercion node with exactly two ident leaves
+// (A then B); the walk turns it into an A-implements/coerces-to-B edge.
+static void h_coercion(RP *rp) {
+    RocqToken a = {0};
+    RocqToken b = {0};
+    bool have_a = false;
+    bool have_b = false;
+    bool seen_colon = false;
+    bool seen_arrow = false;
     for (;;) {
         RocqToken u = rp_next(rp);
         if (u.kind == ROCQ_TOK_DOT || u.kind == ROCQ_TOK_EOF) {
-            return;
+            break;
+        }
+        if (tok_is_colon(u)) {
+            seen_colon = true;
+            continue;
+        }
+        if (u.kind == ROCQ_TOK_SYMBOL && u.len >= 2 && u.text[0] == '>') {
+            seen_arrow = true; // the ">->" coercion arrow
+            continue;
+        }
+        if (seen_colon && u.kind == ROCQ_TOK_IDENT) {
+            if (!seen_arrow) {
+                if (!have_a) {
+                    a = u;
+                    have_a = true;
+                }
+            } else if (!have_b) {
+                b = u;
+                have_b = true;
+            }
+        }
+    }
+    if (have_a && have_b) {
+        rocq_tb_open(rp->tb, RSYM_COERCION, RPROD_NONE);
+        tb_leaf_tok(rp, ident_sym_of(a), a);
+        tb_leaf_tok(rp, ident_sym_of(b), b);
+        rocq_tb_close(rp->tb);
+    }
+}
+
+// Instance: name (child 0), the instantiated class head (child 1, the first
+// top-level identifier after the leading ':'), then a `term` of body references.
+static void h_instance(RP *rp) {
+    RocqToken t = rp_peek(rp);
+    while (t.kind != ROCQ_TOK_IDENT && t.kind != ROCQ_TOK_DOT && t.kind != ROCQ_TOK_EOF) {
+        rp_next(rp);
+        t = rp_peek(rp);
+    }
+    if (t.kind != ROCQ_TOK_IDENT) {
+        skip_to_dot(rp);
+        return;
+    }
+    rocq_tb_open(rp->tb, RSYM_INSTANCE, RPROD_INSTANCE);
+    RocqToken name = rp_next(rp);
+    tb_leaf_tok(rp, RSYM_IDENT, name);
+
+    int depth = 0;
+    bool want_class = false;
+    bool have_class = false;
+    bool term_open = false;
+    for (;;) {
+        RocqToken u = rp_next(rp);
+        if (u.kind == ROCQ_TOK_DOT || u.kind == ROCQ_TOK_EOF) {
+            break;
+        }
+        if (!have_class) {
+            if (u.kind == ROCQ_TOK_LPAREN || u.kind == ROCQ_TOK_LBRACE ||
+                u.kind == ROCQ_TOK_LBRACK) {
+                depth++;
+                continue;
+            }
+            if (u.kind == ROCQ_TOK_RPAREN || u.kind == ROCQ_TOK_RBRACE ||
+                u.kind == ROCQ_TOK_RBRACK) {
+                if (depth > 0) {
+                    depth--;
+                }
+                continue;
+            }
+            if (depth == 0 && !want_class && tok_is_colon(u)) {
+                want_class = true;
+                continue;
+            }
+            if (want_class && depth == 0 && u.kind == ROCQ_TOK_IDENT) {
+                tb_leaf_tok(rp, ident_sym_of(u), u); // class head @ child 1
+                have_class = true;
+            }
+            continue;
+        }
+        body_token(rp, u, &term_open);
+    }
+    close_term(rp, &term_open);
+    rocq_tb_close(rp->tb);
+}
+
+// Require [Import|Export] A.B C …: a require node whose leaves are logical module
+// paths (no name field ⇒ each leaf is a complete path).
+static void h_require(RP *rp) {
+    rocq_tb_open(rp->tb, RSYM_REQUIRE, RPROD_NONE);
+    for (;;) {
+        RocqToken u = rp_next(rp);
+        if (u.kind == ROCQ_TOK_DOT || u.kind == ROCQ_TOK_EOF) {
+            break;
         }
         if (u.kind != ROCQ_TOK_IDENT) {
             continue;
@@ -578,11 +454,13 @@ static void h_require(RP *rp) {
         if (tok_eq(u, "Import") || tok_eq(u, "Export")) {
             continue;
         }
-        emit_import_logical(rp, u.text, u.len);
+        tb_leaf_tok(rp, ident_sym_of(u), u);
     }
+    rocq_tb_close(rp->tb); // dropped if empty
 }
 
-// From X Require [Import|Export] Y Z  — emit imports for X.Y, X.Z.
+// From X Require [Import|Export] Y Z: a require node whose `name` field is the
+// prefix X; the walk prepends it to each remaining leaf (X.Y, X.Z).
 static void h_from(RP *rp) {
     RocqToken pfx = rp_next(rp);
     if (pfx.kind != ROCQ_TOK_IDENT) {
@@ -591,7 +469,6 @@ static void h_from(RP *rp) {
         }
         return;
     }
-    // advance to the Require keyword
     RocqToken t;
     for (;;) {
         t = rp_next(rp);
@@ -602,10 +479,12 @@ static void h_from(RP *rp) {
             break;
         }
     }
+    rocq_tb_open(rp->tb, RSYM_REQUIRE, RPROD_NAME);
+    tb_leaf_tok(rp, ident_sym_of(pfx), pfx); // prefix @ child 0 (name field)
     for (;;) {
         RocqToken u = rp_next(rp);
         if (u.kind == ROCQ_TOK_DOT || u.kind == ROCQ_TOK_EOF) {
-            return;
+            break;
         }
         if (u.kind != ROCQ_TOK_IDENT) {
             continue;
@@ -613,168 +492,50 @@ static void h_from(RP *rp) {
         if (tok_eq(u, "Import") || tok_eq(u, "Export")) {
             continue;
         }
-        char buf[RP_QN_BUF];
-        int n = snprintf(buf, sizeof(buf), "%.*s.%.*s", pfx.len, pfx.text, u.len, u.text);
-        if (n > 0) {
-            emit_import_logical(rp, buf, n < (int)sizeof(buf) ? n : (int)sizeof(buf) - 1);
-        }
+        tb_leaf_tok(rp, ident_sym_of(u), u);
     }
+    rocq_tb_close(rp->tb);
 }
 
 // Import / Export <module> (standalone — opens an already-required module).
 static void h_open_import(RP *rp) {
+    rocq_tb_open(rp->tb, RSYM_IMPORT, RPROD_NONE);
     for (;;) {
         RocqToken u = rp_next(rp);
         if (u.kind == ROCQ_TOK_DOT || u.kind == ROCQ_TOK_EOF) {
-            return;
+            break;
         }
         if (u.kind == ROCQ_TOK_IDENT) {
-            emit_import_logical(rp, u.text, u.len);
+            tb_leaf_tok(rp, ident_sym_of(u), u);
         }
     }
+    rocq_tb_close(rp->tb);
 }
 
+// Proof. — opens a proof node that captures tactic tokens until a terminator.
 static void h_proof(RP *rp) {
-    if (rp->last_def_idx >= 0) {
-        rp->proof_owner = rp->result->defs.items[rp->last_def_idx].qualified_name;
-    } else {
-        rp->proof_owner = NULL;
-    }
-    skip_to_dot(rp);
+    rocq_tb_open(rp->tb, RSYM_PROOF, RPROD_NONE);
+    rp->proof_open = true;
+    skip_to_dot(rp); // consume the `Proof[ using/with …].` header
 }
 
-static void h_end_proof(RP *rp) {
-    int end_line = harvest_to_dot(rp, NULL); // consume; the keyword line ends the proof
-    if (rp->last_def_idx >= 0 && end_line > 0) {
-        rp->result->defs.items[rp->last_def_idx].end_line = (uint32_t)end_line;
-    }
-    rp->proof_owner = NULL;
-    rp->last_def_idx = -1;
+static bool is_proof_terminator(RocqToken t) {
+    return t.kind == ROCQ_TOK_IDENT &&
+           (tok_eq(t, "Qed") || tok_eq(t, "Defined") || tok_eq(t, "Admitted") ||
+            tok_eq(t, "Abort") || tok_eq(t, "Save"));
 }
 
-// Tactic Notation "<pattern>" := (<tac> ...).  Defines a custom-syntax tactic;
-// model it as a Function node named after the pattern and register its literal
-// operators (so notation-style tactic uses resolve to the underlying tactic).
-static void h_tactic_notation(RP *rp) {
-    RocqToken n = rp_peek(rp);
-    if (tok_eq(n, "Notation")) {
-        rp_next(rp);
-        h_notation(rp, "Function");
-    } else {
-        skip_to_dot(rp);
-        rp->last_def_idx = -1;
-    }
-}
-
-// Coercion <name> : <A> >-> <B>.  Records that A coerces to B (a subtyping-like
-// relation), emitted as an impl-trait pair so pass_semantic links A IMPLEMENTS B
-// when both ends resolve. The leading '>' of the ">->" arrow separates A from B.
-static void h_coercion(RP *rp) {
-    const char *a_type = NULL;
-    const char *b_type = NULL;
-    bool seen_colon = false;
-    bool seen_arrow = false;
-    for (;;) {
-        RocqToken u = rp_next(rp);
-        if (u.kind == ROCQ_TOK_DOT || u.kind == ROCQ_TOK_EOF) {
-            break;
-        }
-        if (u.kind == ROCQ_TOK_SYMBOL && u.len == 1 && u.text[0] == ':') {
-            seen_colon = true;
-            continue;
-        }
-        if (u.kind == ROCQ_TOK_SYMBOL && u.len >= 2 && u.text[0] == '>') {
-            seen_arrow = true; // the ">->" coercion arrow
-            continue;
-        }
-        if (seen_colon && u.kind == ROCQ_TOK_IDENT && !is_filtered_callee(u.text, u.len)) {
-            if (!seen_arrow) {
-                if (!a_type) {
-                    a_type = cbm_arena_strndup(rp->a, u.text, (size_t)u.len);
-                }
-            } else if (!b_type) {
-                b_type = cbm_arena_strndup(rp->a, u.text, (size_t)u.len);
-            }
-        }
-    }
-    if (a_type && b_type) {
-        CBMImplTrait it = {0};
-        it.struct_name = a_type; // A implements/coerces-to B
-        it.trait_name = b_type;
-        cbm_impltrait_push(&rp->result->impl_traits, rp->a, it);
-    }
-    rp->last_def_idx = -1;
-}
-
-// Instance (label "Function"): a typeclass instance. Captures the class being
-// instantiated — the head of the type after the top-level ':' — as a base
-// class, which pass_semantic turns into an IMPLEMENTS edge to the Class
-// (Interface). The body is harvested for calls like any definition.
-static void h_instance(RP *rp) {
-    RocqToken t = rp_peek(rp);
-    while (t.kind != ROCQ_TOK_IDENT && t.kind != ROCQ_TOK_DOT && t.kind != ROCQ_TOK_EOF) {
-        rp_next(rp);
-        t = rp_peek(rp);
-    }
-    if (t.kind != ROCQ_TOK_IDENT) {
-        skip_to_dot(rp);
-        rp->last_def_idx = -1;
-        return;
-    }
-    RocqToken name = rp_next(rp);
-    int idx = emit_def(rp, "Function", name, 0);
-    rp->last_def_idx = idx;
-    const char *owner = rp->result->defs.items[idx].qualified_name;
-
-    int depth = 0;
-    bool want_class = false;
-    const char *class_name = NULL;
-    for (;;) {
-        RocqToken u = rp_next(rp);
-        if (u.kind == ROCQ_TOK_DOT || u.kind == ROCQ_TOK_EOF) {
-            break;
-        }
-        if (u.kind == ROCQ_TOK_LPAREN || u.kind == ROCQ_TOK_LBRACE || u.kind == ROCQ_TOK_LBRACK) {
-            depth++;
-            continue;
-        }
-        if (u.kind == ROCQ_TOK_RPAREN || u.kind == ROCQ_TOK_RBRACE || u.kind == ROCQ_TOK_RBRACK) {
-            if (depth > 0) {
-                depth--;
-            }
-            continue;
-        }
-        // The top-level ':' (not part of binders) introduces the class type.
-        if (depth == 0 && !want_class && !class_name && u.kind == ROCQ_TOK_SYMBOL && u.len == 1 &&
-            u.text[0] == ':') {
-            want_class = true;
-            continue;
-        }
-        if (want_class && !class_name && depth == 0 && u.kind == ROCQ_TOK_IDENT &&
-            !is_filtered_callee(u.text, u.len)) {
-            class_name = cbm_arena_strndup(rp->a, u.text, (size_t)u.len);
-            want_class = false;
-        }
-        harvest_token(rp, owner, u);
-    }
-    if (class_name) {
-        const char **bc = (const char **)cbm_arena_alloc(rp->a, 2 * sizeof(char *));
-        if (bc) {
-            bc[0] = class_name;
-            bc[1] = NULL;
-            rp->result->defs.items[idx].base_classes = bc;
-        }
-    }
-}
-
-// Returns true if the keyword token was dispatched as a known command.
+// Returns true if `kw` was dispatched as a known command.
 static bool dispatch_keyword(RP *rp, RocqToken kw) {
     if (tok_eq(kw, "Definition") || tok_eq(kw, "Let") || tok_eq(kw, "Example") ||
-        tok_eq(kw, "Fixpoint") || tok_eq(kw, "CoFixpoint") || tok_eq(kw, "Function") ||
-        tok_eq(kw, "Theorem") || tok_eq(kw, "Lemma") || tok_eq(kw, "Corollary") ||
+        tok_eq(kw, "Fixpoint") || tok_eq(kw, "CoFixpoint") || tok_eq(kw, "Function")) {
+        h_define(rp, RSYM_DEFINITION);
+        return true;
+    }
+    if (tok_eq(kw, "Theorem") || tok_eq(kw, "Lemma") || tok_eq(kw, "Corollary") ||
         tok_eq(kw, "Proposition") || tok_eq(kw, "Remark") || tok_eq(kw, "Fact") ||
         tok_eq(kw, "Property")) {
-        h_define(rp, "Function");
+        h_define(rp, RSYM_THEOREM);
         return true;
     }
     if (tok_eq(kw, "Instance")) {
@@ -782,28 +543,27 @@ static bool dispatch_keyword(RP *rp, RocqToken kw) {
         return true;
     }
     if (tok_eq(kw, "Inductive") || tok_eq(kw, "CoInductive") || tok_eq(kw, "Variant")) {
-        h_type(rp, RP_TYPE_INDUCTIVE, "Type");
+        h_type(rp, RP_TYPE_INDUCTIVE, RSYM_INDUCTIVE);
         return true;
     }
     if (tok_eq(kw, "Record") || tok_eq(kw, "Structure")) {
-        h_type(rp, RP_TYPE_RECORD, "Type");
+        h_type(rp, RP_TYPE_RECORD, RSYM_RECORD);
         return true;
     }
     if (tok_eq(kw, "Class")) {
-        // A typeclass models an interface: instances IMPLEMENT it.
-        h_type(rp, RP_TYPE_RECORD, "Interface");
+        h_type(rp, RP_TYPE_RECORD, RSYM_CLASS);
         return true;
     }
     if (tok_eq(kw, "Module")) {
-        h_module(rp, false);
+        h_module(rp, RSYM_MODULE, false);
         return true;
     }
     if (tok_eq(kw, "Section")) {
-        h_module(rp, true);
+        h_module(rp, RSYM_SECTION, true);
         return true;
     }
     if (tok_eq(kw, "End")) {
-        scope_pop(rp);
+        rocq_tb_close(rp->tb); // close the innermost open module/section
         skip_to_dot(rp);
         return true;
     }
@@ -818,7 +578,7 @@ static bool dispatch_keyword(RP *rp, RocqToken kw) {
         return true;
     }
     if (tok_eq(kw, "Notation") || tok_eq(kw, "Infix")) {
-        h_notation(rp, "Variable");
+        h_notation(rp, RSYM_NOTATION);
         return true;
     }
     if (tok_eq(kw, "Tactic")) {
@@ -846,21 +606,16 @@ static bool dispatch_keyword(RP *rp, RocqToken kw) {
         return true;
     }
     if (tok_eq(kw, "Qed") || tok_eq(kw, "Defined") || tok_eq(kw, "Admitted") ||
-        tok_eq(kw, "Abort") || tok_eq(kw, "Save")) {
-        h_end_proof(rp);
-        return true;
-    }
-    if (tok_eq(kw, "Goal")) {
-        rp->last_def_idx = -1;
+        tok_eq(kw, "Abort") || tok_eq(kw, "Save") || tok_eq(kw, "Goal")) {
+        // Stray proof terminator / anonymous goal outside a captured proof.
         skip_to_dot(rp);
         return true;
     }
     return false;
 }
 
-// Consume command prefixes (attributes and modifier keywords) so the real
-// command keyword can be dispatched. Returns the keyword token, or an EOF
-// token at end of input.
+// Consume attributes (#[ … ]) and modifier keywords so the real command keyword
+// can be dispatched. Returns the keyword token, or an EOF token at end of input.
 static RocqToken read_command_keyword(RP *rp) {
     for (;;) {
         RocqToken t = rp_peek(rp);
@@ -871,7 +626,6 @@ static RocqToken read_command_keyword(RP *rp) {
             rp_next(rp); // empty command
             continue;
         }
-        // Attribute: #[ ... ]
         if (t.kind == ROCQ_TOK_SYMBOL && t.len >= 1 && t.text[0] == '#') {
             rp_next(rp);
             RocqToken b = rp_peek(rp);
@@ -893,13 +647,10 @@ static RocqToken read_command_keyword(RP *rp) {
             }
             continue;
         }
-        // Modifier prefixes that precede a real command keyword.
         if (tok_eq(t, "Local") || tok_eq(t, "Global") || tok_eq(t, "Polymorphic") ||
             tok_eq(t, "Monomorphic") || tok_eq(t, "Program") || tok_eq(t, "Cumulative") ||
             tok_eq(t, "NonCumulative") || tok_eq(t, "Private") || tok_eq(t, "Reserved") ||
             tok_eq(t, "Existing") || tok_eq(t, "Canonical")) {
-            // "Existing Instance" / "Canonical Structure" have no nameable head
-            // we model; just drop the modifier and re-dispatch the next token.
             rp_next(rp);
             continue;
         }
@@ -907,30 +658,32 @@ static RocqToken read_command_keyword(RP *rp) {
     }
 }
 
-void rocq_parse_file(CBMArena *a, CBMFileResult *result, const char *source, int source_len,
-                     const char *module_qn, const char *rel_path) {
+void *rocq_parse_to_tree(const char *source, int source_len) {
     RP rp = {0};
-    rp.a = a;
-    rp.result = result;
-    rp.module_qn = module_qn;
-    rp.rel_path = rel_path ? cbm_arena_strdup(a, rel_path) : NULL;
-    rp.last_def_idx = -1;
     rocq_lex_init(&rp.lx, source, source_len);
-
-    // Seed notations imported from Require'd modules (resolved cross-file by the
-    // pre-pass), so notation uses resolve across files. The file's own notations
-    // layer on top in file order as they are parsed.
-    const RocqSeedDB *seeddb = cbm_rocq_get_seeddb();
-    if (seeddb && rp.rel_path) {
-        const RocqNotationEntry *seed = NULL;
-        int sn = rocq_seeddb_lookup(seeddb, rp.rel_path, &seed);
-        for (int i = 0; i < sn; i++) {
-            register_notation(&rp, seed[i].op, (int)strlen(seed[i].op),
-                              cbm_arena_strdup(a, seed[i].target));
-        }
+    rp.tb = rocq_tb_new(source, source_len);
+    if (!rp.tb) {
+        return NULL;
     }
 
     for (;;) {
+        if (rp.proof_open) {
+            RocqToken t = rp_next(&rp);
+            if (t.kind == ROCQ_TOK_EOF) {
+                break; // rocq_tb_finish closes the dangling proof
+            }
+            if (is_proof_terminator(t)) {
+                rocq_tb_close(rp.tb); // close PROOF
+                rp.proof_open = false;
+                skip_to_dot(&rp); // consume `Qed.`
+                continue;
+            }
+            RocqSymbol s = leaf_sym_of(t);
+            if (s != RSYM_END) {
+                tb_leaf_tok(&rp, s, t);
+            }
+            continue;
+        }
         RocqToken kw = read_command_keyword(&rp);
         if (kw.kind == ROCQ_TOK_EOF) {
             break;
@@ -938,13 +691,10 @@ void rocq_parse_file(CBMArena *a, CBMFileResult *result, const char *source, int
         if (kw.kind == ROCQ_TOK_IDENT && dispatch_keyword(&rp, kw)) {
             continue;
         }
-        // Not a recognized command. Inside a proof, the line is a tactic step:
-        // harvest its references. The keyword token itself is a candidate too.
-        if (rp.proof_owner) {
-            harvest_token(&rp, rp.proof_owner, kw);
-            harvest_to_dot(&rp, rp.proof_owner);
-        } else {
-            skip_to_dot(&rp);
-        }
+        skip_to_dot(&rp); // unrecognized command — record no node
     }
+
+    void *tree = rocq_tb_finish(rp.tb); // closes any unbalanced module/proof frames
+    rocq_tb_free(rp.tb);
+    return tree;
 }

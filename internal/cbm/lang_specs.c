@@ -164,9 +164,20 @@ extern const TSLanguage *tree_sitter_apex(void);
 extern const TSLanguage *tree_sitter_soql(void);
 extern const TSLanguage *tree_sitter_sosl(void);
 extern const TSLanguage *tree_sitter_pine(void);
+// Hand-authored, table-less TSLanguage built in internal/cbm/grammar_rocq.c
+// (no tree-sitter CLI). The tree is constructed directly by our parser.
+extern const TSLanguage *tree_sitter_rocq(void);
 
 // -- Empty sentinel --
 static const char *empty_types[] = {NULL};
+
+// -- Rocq node→role mapping (documents the tree shape rocq_walk.c consumes) --
+static const char *rocq_func_types[] = {"definition", "theorem", "instance", "tactic", NULL};
+static const char *rocq_class_types[] = {"inductive", "record", "class", NULL};
+static const char *rocq_field_types[] = {"constructor", "field_def", NULL};
+static const char *rocq_module_types[] = {"module", "module_type", "section", NULL};
+static const char *rocq_import_types[] = {"require", "import", NULL};
+static const char *rocq_var_types[] = {"assumption", "notation", NULL};
 
 // ==================== GO ====================
 static const char *go_func_types[] = {"function_declaration", "method_declaration", "method_elem",
@@ -2537,13 +2548,18 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
                        pine_branch_types, pine_var_types, pine_assign_types, empty_types, NULL,
                        empty_types, NULL, NULL, tree_sitter_pine, NULL},
 
-    // CBM_LANG_ROCQ — parsed by the original hand-written front-end in
-    // internal/cbm/rocq/, not tree-sitter. This grammar-less entry exists only
-    // so the spec table stays sized to CBM_LANG_COUNT; cbm_extract_file routes
-    // Rocq away before any field here is read.
-    [CBM_LANG_ROCQ] = {CBM_LANG_ROCQ, empty_types, empty_types, empty_types, empty_types,
-                       empty_types, empty_types, empty_types, empty_types, empty_types,
-                       empty_types, empty_types, NULL, empty_types, empty_types, NULL, NULL, NULL},
+    // CBM_LANG_ROCQ — Rocq (formerly Coq). The grammar (tree_sitter_rocq) is an
+    // original, table-less hand-authored TSLanguage; our front-end builds the
+    // TSTree directly (no tree-sitter CLI). cbm_extract_file builds that tree and
+    // walks it with a dedicated consumer (rocq_walk.c) — the generic extractors
+    // are bypassed because they cannot model Rocq's module-scoped qualified names
+    // or its user-extensible (notation) syntax. The node-type arrays below
+    // document the node→role mapping the walk uses; ts_factory makes Rocq a
+    // first-class registered tree-sitter language.
+    [CBM_LANG_ROCQ] = {CBM_LANG_ROCQ, rocq_func_types, rocq_class_types, rocq_field_types,
+                       rocq_module_types, empty_types, rocq_import_types, empty_types, empty_types,
+                       rocq_var_types, empty_types, empty_types, NULL, empty_types, empty_types,
+                       NULL, tree_sitter_rocq, NULL},
 
 };
 

@@ -167,12 +167,11 @@ static void scan_from(CBMArena *a, RocqLexer *lx, RocqFileScan *out, int *rcap, 
             continue;
         }
         char buf[512];
+        // pfx and module are both non-empty identifiers, so n is always >= 3.
         int n = snprintf(buf, sizeof(buf), "%.*s.%.*s", pfx.len, pfx.text, u.len, u.text);
-        if (n > 0) {
-            add_require(a, out, rcap, ecap,
-                        cbm_arena_strndup(a, buf, (size_t)(n < (int)sizeof(buf) ? n : (int)sizeof(buf) - 1)),
-                        is_export);
-        }
+        add_require(a, out, rcap, ecap,
+                    cbm_arena_strndup(a, buf, (size_t)(n < (int)sizeof(buf) ? n : (int)sizeof(buf) - 1)),
+                    is_export);
     }
 }
 

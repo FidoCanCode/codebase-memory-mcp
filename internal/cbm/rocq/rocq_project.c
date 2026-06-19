@@ -29,7 +29,9 @@ void rocq_projmap_free(RocqProjMap *m) {
 
 // Take ownership of physdir/logical; drops them if the map can't grow.
 static void projmap_add(RocqProjMap *m, char *physdir, char *logical) {
-    if (!physdir || !logical || !logical[0]) {
+    // physdir/logical are NULL only when their dup_range allocation failed (OOM);
+    // add_dune never passes an empty logical (it requires a non-empty name atom).
+    if (!physdir || !logical) {
         free(physdir);
         free(logical);
         return;
@@ -61,8 +63,8 @@ static char *dup_range(const char *s, int len) {
 
 // Index of the first occurrence of `needle` within hay[0..hlen), or -1.
 static int find_sub(const char *hay, int hlen, const char *needle) {
-    int nlen = (int)strlen(needle);
-    if (nlen == 0 || hlen < nlen) {
+    int nlen = (int)strlen(needle); // always a non-empty literal ("coq.theory"/"name")
+    if (hlen < nlen) {
         return -1;
     }
     for (int i = 0; i <= hlen - nlen; i++) {
@@ -115,11 +117,8 @@ bool rocq_projmap_resolve(const RocqProjMap *m, const char *logical, char *out, 
     int best = -1;
     size_t best_len = 0;
     for (int i = 0; i < m->count; i++) {
-        const char *lp = m->entries[i].logical;
+        const char *lp = m->entries[i].logical; // non-empty (projmap_add rejects empty)
         size_t ll = strlen(lp);
-        if (ll == 0) {
-            continue;
-        }
         if (strncmp(logical, lp, ll) == 0 && (logical[ll] == '.' || logical[ll] == '\0')) {
             if (best < 0 || ll > best_len) {
                 best = i;
@@ -150,7 +149,7 @@ bool rocq_projmap_resolve(const RocqProjMap *m, const char *logical, char *out, 
         }
     }
     n += snprintf(out + n, (size_t)(outsz - n > 0 ? outsz - n : 0), ".v");
-    return n > 0 && n < outsz;
+    return n < outsz; // n is always >= 2 (the ".v" suffix), so only truncation can fail
 }
 
 bool rocq_projmap_logical_for_path(const RocqProjMap *m, const char *rel_path, char *out,
@@ -182,12 +181,11 @@ bool rocq_projmap_logical_for_path(const RocqProjMap *m, const char *rel_path, c
         ul -= 2; // strip ".v"
     }
 
-    int n = 0;
-    if (e->logical[0]) {
-        n += snprintf(out + n, (size_t)(outsz - n), "%s", e->logical);
-    }
+    // logical is always non-empty (projmap_add rejects empty names), so n >= 1
+    // after this and the '.' separator below only needs a truncation check.
+    int n = (int)snprintf(out, (size_t)outsz, "%s", e->logical);
     if (ul > 0) {
-        if (n > 0 && n < outsz) {
+        if (n < outsz) {
             out[n++] = '.';
         }
         for (size_t k = 0; k < ul && n < outsz - 1; k++) {
@@ -197,5 +195,5 @@ bool rocq_projmap_logical_for_path(const RocqProjMap *m, const char *rel_path, c
     if (n < outsz) {
         out[n] = '\0';
     }
-    return n > 0 && n < outsz;
+    return n < outsz;
 }
