@@ -674,6 +674,23 @@ TEST(lang_v_default_on_read_fail) {
     PASS();
 }
 
+/* Cheap first-token fast-path: // line comments and C-style block comments are
+ * Verilog-exclusive (Rocq has only the (* … *) form), so a file opening with one
+ * is Verilog without needing the structural veto or trial-parse. */
+TEST(lang_v_cstyle_comment_is_verilog) {
+    ASSERT_EQ(disambiguate_v_str("tl_v_line.v", "// SPDX-License-Identifier: MIT\nmodule m; endmodule\n"),
+              CBM_LANG_VERILOG);
+    ASSERT_EQ(disambiguate_v_str("tl_v_block.v", "/* a C-style header\n   block comment */\nmodule m; endmodule\n"),
+              CBM_LANG_VERILOG);
+    ASSERT_EQ(disambiguate_v_str("tl_v_blockws.v", "\n\n   /* indented block */\nwire x;\n"),
+              CBM_LANG_VERILOG);
+    /* A leading (* is Rocq's comment form (ambiguous with a Verilog attribute):
+     * it must NOT shortcut to Verilog — the trial-parse still recognizes the Rocq. */
+    ASSERT_EQ(disambiguate_v_str("tl_v_paren.v", "(* a Rocq comment *)\nDefinition x := 0.\n"),
+              CBM_LANG_ROCQ);
+    PASS();
+}
+
 /* --- New languages (auto-generated) --- */
 TEST(lang_ext_solidity) {
     ASSERT_EQ(cbm_language_for_extension(".sol"), CBM_LANG_SOLIDITY);
@@ -1274,6 +1291,7 @@ SUITE(language) {
     RUN_TEST(lang_v_rocq_module_word_in_comment);
     RUN_TEST(lang_v_rocq_large_header);
     RUN_TEST(lang_v_default_on_read_fail);
+    RUN_TEST(lang_v_cstyle_comment_is_verilog);
 
     /* Go test ports */
     /* New languages */
